@@ -1,0 +1,6 @@
+.build/
+dist/
+sidecar/
+*.xcuserdata
+.DS_Store
+/tmp/

@@ -1,0 +1,74 @@
+# 净听 PureListen
+
+**网易云音乐 · 无损独占输出 · 为操作简便而生**
+
+一款 macOS 菜单栏应用。启动它, 网易云音乐就会以**无损、无 SRC** 的方式从本机 3.5mm 耳机孔输出——不需要 SoundSource, 不需要手动切采样率, 不需要 Audio MIDI Setup。
+
+## 它解决什么问题
+
+macOS 会把所有 App 的音频混在一起, 统一重采样 (SRC) 后输出。听无损音乐时, 这种"系统级混合重采样"会引入可闻的损失 (高频发毛、发糊)。iPhone/iPad 没有这个问题, 因为播放器会独占音频输出; 而 Mac 版网易云音乐没有独占功能。
+
+净听的做法 (全部自动, 无需任何手动操作):
+
+1. **hog mode 独占输出设备** —— 直接绕过 coreaudiod 系统混音器, 其他 App 的声音不再混入;
+2. **每首歌自动切换采样率** —— 播放前读取音源真实采样率, 把设备标称采样率切到完全一致 (44.1/48/88.2/96 kHz), 从根源上消除 SRC;
+3. **位完美直通** —— FLAC 解码后以设备原生格式直写硬件, 音量 100% 时不做任何乘法 (UI 会显示"位完美"标记);
+4. **CPU 占用接近零** —— 没有 SoundSource 那种多模块绕行, 只有一条解码线程 + 一个 IOProc。
+
+## 功能
+
+- **网易云独占无损播放**: 扫码登录、歌单、无损/Hi-Res 取链、hog mode 独占 3.5mm/任意输出设备、自动采样率切换、位完美直通
+- **B站播放**: 粘贴视频链接/BV号/b23短链, 自动取最高音质 DASH 音频(192kbps), 支持分P
+- **直链播放**: 粘贴任意音频直链(FLAC/MP3/M4A/WAV…)
+- **链路可视化**: 正在播放页实时展示 音源→解码→缓冲→独占→输出 全链路状态与 SRC 消除情况
+- **音量键接管**: 独占时系统音量键本已无效, 开启接管后(需辅助功能权限)由本 App 响应
+- 默认 10% 安全音量; 100% 时位完美(不做任何数字处理)
+
+## 使用
+
+```bash
+./build.sh          # 构建并打包
+cp -r "dist/净听.app" /Applications/
+```
+
+1. 菜单栏出现 🎧 图标, 点开扫码登录 (用网易云音乐 App 扫);
+2. 选歌单, 点歌, 插上 3.5mm 耳机, 完事;
+3. 之后每次启动会自动继续上次歌单并开始播放 ("设置"里可关)。
+
+播放时底部会实时显示: `44.1kHz/16bit · 独占输出 · FLAC`。
+
+## 说明与限制
+
+- **需要黑胶 VIP** 才能取到无损/Hi-Res 直链 (这是网易的版权限制, 与本 App 无关); 非 VIP 自动回退到可用音质。
+- **内置 3.5mm 孔最高 96 kHz**; 192 kHz 母带音源会自动降到 96 kHz 播放 (如需 192k 请在设置里选外置 USB/雷雳 DAC, App 支持选择任意输出设备)。
+- 独占播放期间, **其他 App 的声音会被暂时屏蔽** (与 iPhone 接电话时的行为一致), 停止/暂停后恢复。
+- 独占模式下系统音量键对耳机孔无效, 请用 App 内音量条 (100% = 位完美, 低于 100% 为数字衰减)。
+- 本 App 使用网易网页端同款 weapi/eapi 接口 (逆向实现), 仅供个人学习研究; 请使用自己的账号, 理论上存在与官方客户端风控策略冲突的风险。
+- 歌曲缓存位于 `~/Library/Caches/PureListen`, 可在设置中一键清除。
+
+## 工程结构
+
+```
+Sources/
+  PureListenCore/            核心库
+    NCAPI/                   网易云客户端 (weapi/eapi 加密、扫码登录、歌单、直链)
+    Audio/                   独占输出引擎 (hog mode、采样率切换、FLAC 解码、无锁环形缓冲)
+  PureListen/                菜单栏 App (SwiftUI)
+  hogtest/                   独占输出链路自测 CLI (生成测试音并验证 hog/切率/恢复)
+  apitest/                   API 连通性自测 CLI (二维码创建/轮询、取直链)
+build.sh                     Release 构建 + 组装 .app + ad-hoc 签名
+```
+
+## 自测
+
+```bash
+.build/out/Products/Debug/hogtest              # 独占播放 88.2kHz 测试音并恢复现场
+.build/out/Products/Debug/apitest qr           # 走一遍扫码登录链路
+.build/out/Products/Debug/apitest url <歌曲id> # 验证 eapi 取直链
+```
+
+## 开源
+
+MIT License · 作者 [Halo0sama](https://github.com/Halo0sama)
+
+致谢: [NeriPlayer](https://github.com/cwuom/NeriPlayer)(B站登录与播放页设计参考)、[NeteaseCloudMusicApi](https://github.com/Binaryify/NeteaseCloudMusicApi)(接口协议参考)、[bilibili-API-collect](https://github.com/SocialSisterYi/bilibili-API-collect)(B站接口文档)。
