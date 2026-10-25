@@ -4,3 +4,9 @@ sidecar/
 *.xcuserdata
 .DS_Store
 /tmp/
+.build*/
+# UI 截图由 tools/shoot-screens.sh 生成, 仓库里只保留精选的 gallery
+docs/design/screens/
+docs/research/api-scratch/**/.build/
+docs/research/api-scratch/**/build/
+*.png.bak

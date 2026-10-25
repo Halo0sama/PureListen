@@ -11,8 +11,13 @@ APP=dist/净听.app
 
 echo "==> 组装 $APP"
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/PureListen"
+
+# 应用图标(macOS 27 分层玻璃风格), 由 tools/make_icon.swift 生成
+if [ -f "Resources/AppIcon.icns" ]; then
+    cp "Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+fi
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -26,19 +31,25 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleIdentifier</key>
     <string>com.purelisten.app</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>2</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
+    <string>2.0.0</string>
     <key>CFBundleExecutable</key>
     <string>PureListen</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>LSMinimumSystemVersion</key>
-    <string>13.0</string>
+    <string>26.0</string>
     <key>LSUIElement</key>
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSSupportsAutomaticGraphicsSwitching</key>
+    <true/>
+    <key>NSHumanReadableCopyright</key>
+    <string>MIT License · Halo0sama</string>
     <key>NSAppTransportSecurity</key>
     <dict>
         <key>NSAllowsArbitraryLoads</key>
@@ -51,8 +62,9 @@ PLIST
 echo "==> Ad-hoc 签名"
 codesign --force --sign - "$APP"
 
-# 自动同步: 用户已把 App 放进 /Applications 时, 保持它为最新版
-if [ -d "/Applications/净听.app" ]; then
+# 自动同步: 用户已把 App 放进 /Applications 时, 保持它为最新版。
+# 只想检查构建产物、不想替换已安装版本时: PURELISTEN_NO_INSTALL=1 ./build.sh
+if [ -d "/Applications/净听.app" ] && [ "${PURELISTEN_NO_INSTALL:-0}" != "1" ]; then
     echo "==> 同步最新版到 /Applications"
     rm -rf "/Applications/净听.app"
     cp -R "$APP" /Applications/

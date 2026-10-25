@@ -1,0 +1,12 @@
+negative-tests/unguarded-concentric-rectangle.swift:6:30: error: 'ConcentricRectangle' is only available in macOS 26.0 or newer
+2 | import SwiftUI
+3 | 
+4 | struct Card: View {
+  |        `- note: add '@available' attribute to enclosing struct
+5 |     var body: some View {
+  |         `- note: add '@available' attribute to enclosing property
+6 |         Text("hi").clipShape(ConcentricRectangle(corners: .concentric))
+  |                              |- error: 'ConcentricRectangle' is only available in macOS 26.0 or newer
+  |                              `- note: add 'if #available' version check
+7 |     }
+8 | }

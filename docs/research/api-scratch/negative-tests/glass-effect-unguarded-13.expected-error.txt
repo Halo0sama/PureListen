@@ -1,0 +1,10 @@
+negative-tests/glass-effect-unguarded-13.swift:6:5: error: 'NSGlassEffectView' is only available in macOS 26.0 or newer
+3 | import AppKit
+4 | 
+5 | func makeGlassView() -> NSView {
+  |      `- note: add '@available' attribute to enclosing global function
+6 |     NSGlassEffectView()
+  |     |- error: 'NSGlassEffectView' is only available in macOS 26.0 or newer
+  |     `- note: add 'if #available' version check
+7 | }
+8 | 

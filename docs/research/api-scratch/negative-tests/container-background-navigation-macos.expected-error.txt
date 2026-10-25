@@ -1,0 +1,14 @@
+negative-tests/container-background-navigation-macos.swift:7:64: error: 'navigation' is unavailable in macOS
+ 5 | struct Content: View {
+ 6 |     var body: some View {
+ 7 |         Text("hi").containerBackground(.regularMaterial, for: .navigation)
+   |                                                                `- error: 'navigation' is unavailable in macOS
+ 8 |     }
+ 9 | }
+
+SwiftUI.ContainerBackgroundPlacement.navigation:6:21: note: 'navigation' has been explicitly marked unavailable here
+4 |   @available(tvOS, unavailable)
+5 |   @available(visionOS, unavailable)
+6 |   public static let navigation: ContainerBackgroundPlacement}
+  |                     `- note: 'navigation' has been explicitly marked unavailable here
+7 | 

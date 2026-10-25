@@ -237,9 +237,16 @@ final class AppState: ObservableObject {
 
     let player = ExclusivePlayer()
     private var client: NCClient
-    private let defaults = UserDefaults.standard
+    private let defaults: UserDefaults
+    /// 预览/截图模式: 不枚举或占用音频设备、不启动音量镜像与媒体键轮询, 只用于渲染界面。
+    /// Debug 下由 `UIPreviewStudio` 使用, Release 构建中恒为 false。
+    private let previewMode: Bool
     private var qrKey: String?
     private var qrPollTask: Task<Void, Never>?
+#if DEBUG
+    /// 预览/截图用的假二维码内容(不发起网络请求)。
+    fileprivate var previewLoginQRContent: String?
+#endif
 
     var isLoggedIn: Bool { profile != nil }
     /// 是否已拿到登录 Cookie(即使界面还在登录中)。
@@ -255,7 +262,9 @@ final class AppState: ObservableObject {
         return currentPlaylist != nil ? "网易云·歌单" : "网易云"
     }
 
-    init() {
+    init(defaults: UserDefaults = .standard, previewMode: Bool = false) {
+        self.defaults = defaults
+        self.previewMode = previewMode
         let cookies = (defaults.dictionary(forKey: "cookies") as? [String: String]) ?? [:]
         let deviceId = defaults.string(forKey: "deviceId")
         client = NCClient(cookies: cookies, deviceId: deviceId)
@@ -264,7 +273,7 @@ final class AppState: ObservableObject {
         blockOtherOutputs = defaults.bool(forKey: "blockOtherOutputs")
         player.blockOtherOutputs = blockOtherOutputs
         autoDevice = !defaults.bool(forKey: "devicePinned")
-        setupHotplugListener()
+        if !previewMode { setupHotplugListener() }
         biliMid = defaults.integer(forKey: "biliMid")
         if biliClient.isLoggedIn {
             biliPhase = .loggedIn
@@ -296,7 +305,7 @@ final class AppState: ObservableObject {
                 }
             }
         }
-        if defaults.object(forKey: "volumeMirror") == nil || defaults.bool(forKey: "volumeMirror") {
+        if !previewMode, defaults.object(forKey: "volumeMirror") == nil || defaults.bool(forKey: "volumeMirror") {
             systemVolumeMirror = true   // 默认开启
         }
         mediaKeyTap.onVolumeChange = { [weak self] delta in
@@ -351,7 +360,7 @@ final class AppState: ObservableObject {
         player.onTrackFinished = { [weak self] in
             Task { @MainActor in self?.playNext(autoPlay: true) }
         }
-        refreshDevices()
+        if !previewMode { refreshDevices() }
     }
 
     // MARK: - 设备
@@ -531,6 +540,9 @@ final class AppState: ObservableObject {
     }
 
     var loginQRURL: String? {
+#if DEBUG
+        if let previewLoginQRContent { return previewLoginQRContent }
+#endif
         guard let qrKey else { return nil }
         return client.loginQRURL + qrKey
     }
@@ -949,3 +961,20 @@ private extension String {
         return String(abs(hashValue))
     }
 }
+
+#if DEBUG
+// MARK: - 预览注入(Debug)
+
+extension AppState {
+    /// 截图: 直接给登录页一个可渲染的二维码, 不请求网易接口。
+    func previewSetLoginQR(_ content: String?) {
+        previewLoginQRContent = content
+    }
+
+    /// 截图: 直接给 B 站登录页一个可渲染的二维码。
+    func previewSetBiliQR(_ content: String?) {
+        biliQRURL = content
+        if content != nil { biliPhase = .qrWaiting }
+    }
+}
+#endif

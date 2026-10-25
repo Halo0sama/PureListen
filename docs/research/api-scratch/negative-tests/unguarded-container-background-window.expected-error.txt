@@ -1,0 +1,13 @@
+negative-tests/unguarded-container-background-window.swift:8:66: error: 'window' is only available in macOS 15.0 or newer
+ 3 | import SwiftUI
+ 4 | 
+ 5 | struct Content: View {
+   |        `- note: add '@available' attribute to enclosing struct
+ 6 |     var body: some View {
+   |         `- note: add '@available' attribute to enclosing property
+ 7 |         if #available(macOS 14.0, *) {
+ 8 |             Text("hi").containerBackground(.thickMaterial, for: .window)
+   |                                                                  |- error: 'window' is only available in macOS 15.0 or newer
+   |                                                                  `- note: add 'if #available' version check
+ 9 |         } else {
+10 |             Text("hi")

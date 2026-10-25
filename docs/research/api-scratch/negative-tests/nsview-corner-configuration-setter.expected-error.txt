@@ -1,0 +1,7 @@
+negative-tests/nsview-corner-configuration-setter.swift:7:10: error: cannot assign to property: 'cornerConfiguration' is a get-only property
+5 | @available(macOS 27.0, *)
+6 | func configure(_ view: NSView) {
+7 |     view.cornerConfiguration = .corners(radius: .fixed(12))
+  |          `- error: cannot assign to property: 'cornerConfiguration' is a get-only property
+8 | }
+9 | 

@@ -181,6 +181,12 @@ public final class BiliClient {
         public var id: Int
         public var title: String
         public var mediaCount: Int
+
+        public init(id: Int, title: String, mediaCount: Int) {
+            self.id = id
+            self.title = title
+            self.mediaCount = mediaCount
+        }
     }
 
     public struct FavVideo: Identifiable, Equatable {

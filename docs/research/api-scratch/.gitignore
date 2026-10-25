@@ -1,0 +1,3 @@
+# SwiftPM build products from the scratch verification packages
+.build/
+.swiftpm/

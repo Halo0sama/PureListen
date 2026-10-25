@@ -9,6 +9,16 @@ public struct AudioDeviceInfo: Identifiable, Equatable {
     public var isBuiltIn: Bool
     public var currentRate: Double
     public var hasOutput: Bool
+
+    public init(id: AudioDeviceID, uid: String, name: String, isBuiltIn: Bool,
+                currentRate: Double, hasOutput: Bool) {
+        self.id = id
+        self.uid = uid
+        self.name = name
+        self.isBuiltIn = isBuiltIn
+        self.currentRate = currentRate
+        self.hasOutput = hasOutput
+    }
 }
 
 public enum AudioDevice {

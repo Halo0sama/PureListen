@@ -1,0 +1,12 @@
+negative-tests/unguarded-glass-effect.swift:10:30: error: 'glassEffect(_:in:)' is only available in macOS 26.0 or newer
+ 6 | import SwiftUI
+ 7 | 
+ 8 | struct Card: View {
+   |        `- note: add '@available' attribute to enclosing struct
+ 9 |     var body: some View {
+   |         `- note: add '@available' attribute to enclosing property
+10 |         Text("hi").padding().glassEffect(in: .rect(cornerRadius: 12))
+   |                              |- error: 'glassEffect(_:in:)' is only available in macOS 26.0 or newer
+   |                              `- note: add 'if #available' version check
+11 |     }
+12 | }
