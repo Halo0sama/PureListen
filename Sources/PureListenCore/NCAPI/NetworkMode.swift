@@ -1,13 +1,17 @@
 import Foundation
 import CFNetwork
 
-/// API 与音频下载共用的网络策略。Finder 启动的 App 也读取系统代理。
+/// API 与音频下载共用的网络策略。国内服务默认直连，代理仅在手动选择时启用。
 public enum NetworkMode: String, CaseIterable {
-    case system
     case direct
+    case system
 
     public static var current: NetworkMode {
-        NetworkMode(rawValue: UserDefaults.standard.string(forKey: "networkMode") ?? "") ?? .system
+        load(from: .standard)
+    }
+
+    public static func load(from defaults: UserDefaults) -> NetworkMode {
+        NetworkMode(rawValue: defaults.string(forKey: "networkMode") ?? "") ?? .direct
     }
 
     public var label: String {

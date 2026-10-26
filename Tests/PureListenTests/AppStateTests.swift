@@ -23,10 +23,14 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(state.player.volume, 0)
         XCTAssertFalse(state.systemVolumeMirror)
         XCTAssertFalse(state.autoResume)
+        XCTAssertEqual(state.networkMode, .direct)
         state.level = .hires
-        state.networkMode = .direct
+        state.networkMode = .system
         XCTAssertEqual(defaults.string(forKey: "level"), "hires")
-        XCTAssertEqual(defaults.string(forKey: "networkMode"), "direct")
+        XCTAssertEqual(defaults.string(forKey: "networkMode"), "system")
+        let restored = AppState(defaults: defaults, previewMode: true)
+        XCTAssertEqual(restored.networkMode, .system)
+        restored.shutdown()
         XCTAssertTrue(state.devices.isEmpty)
     }
 

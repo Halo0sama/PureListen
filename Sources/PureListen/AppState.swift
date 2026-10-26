@@ -29,7 +29,7 @@ final class AppState: ObservableObject {
     @Published var level: NCLevel = .lossless {
         didSet { defaults.set(level.rawValue, forKey: "level") }
     }
-    @Published var networkMode: NetworkMode = .system {
+    @Published var networkMode: NetworkMode = .direct {
         didSet { defaults.set(networkMode.rawValue, forKey: "networkMode") }
     }
     @Published var volume: Float = 1.0 {
@@ -333,7 +333,7 @@ final class AppState: ObservableObject {
         let savedVolume = defaults.object(forKey: "volume") == nil ? 0.1 : defaults.double(forKey: "volume")
         volume = savedVolume.isFinite ? Float(min(max(savedVolume, 0), 1)) : 0.1
         player.volume = volume
-        networkMode = NetworkMode(rawValue: defaults.string(forKey: "networkMode") ?? "") ?? .system
+        networkMode = NetworkMode.load(from: defaults)
         autoResume = defaults.object(forKey: "autoResume") == nil ? true : defaults.bool(forKey: "autoResume")
         // 系统音量 → App 音量镜像(0.4s 轮询, 拖动滑条后 2 秒内不覆盖)
         volumeMirror.onSystemVolume = { [weak self] value in

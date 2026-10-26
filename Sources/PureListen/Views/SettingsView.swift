@@ -125,7 +125,7 @@ struct SettingsView: View {
 
     private var networkSection: some View {
         SettingsSection(title: "网络", metrics: metrics) {
-            SettingsRow(title: "连接方式", subtitle: "VPN 用户建议跟随系统代理；更改后对新请求生效", metrics: metrics) {
+            SettingsRow(title: "连接方式", subtitle: "国内服务默认直连；更改后对新请求生效", metrics: metrics) {
                 Picker("连接方式", selection: $state.networkMode) {
                     ForEach(NetworkMode.allCases, id: \.self) { mode in
                         Text(mode.label).tag(mode)
