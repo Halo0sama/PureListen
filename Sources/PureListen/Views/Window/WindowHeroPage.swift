@@ -74,7 +74,11 @@ struct WindowHeroPage: View {
     private func artSize(for size: CGSize) -> CGFloat {
         let byWidth = size.width * 0.37
         let byHeight = size.height * 0.50
-        return min(max(min(byWidth, byHeight), 196), 288)
+        let base = min(max(min(byWidth, byHeight), 196), 288)
+        switch state.playerState {
+        case .error, .loading: return max(196, base - 28)
+        default: return base
+        }
     }
 
     // MARK: 有曲目
@@ -98,6 +102,8 @@ struct WindowHeroPage: View {
             Spacer().frame(height: compact ? 10 : 16)
 
             transport(compact: compact)
+
+            PlaybackControlStatus()
 
             Spacer().frame(height: compact ? 8 : 14)
 

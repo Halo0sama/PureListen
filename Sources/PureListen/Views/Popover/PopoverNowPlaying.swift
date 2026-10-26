@@ -86,6 +86,8 @@ struct PopoverNowPlayingPage: View {
             controls
                 .padding(.top, 14)
 
+            PlaybackControlStatus()
+
             DSVolumeBar(volume: Double(state.volume), tint: tint) { value in
                 state.setManualVolume(Float(value))
             }

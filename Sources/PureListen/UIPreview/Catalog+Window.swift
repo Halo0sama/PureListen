@@ -52,6 +52,12 @@ enum WindowPreviewScenes {
             // 设置: 由 Settings 同学填充内容, 这里验证窗口容器与页头。
             scene("window-settings", section: .settings),
 
+            scene("window-reconnect-error") { state in
+                state.playerState = .error("输出设备未就绪，请连接后点击播放")
+                state.trackStatus.exclusive = false
+                state.volume = 0.1
+            },
+
             // 空状态: 还没有开始播放。
             scene("window-idle") { state in
                 state.playerState = .idle

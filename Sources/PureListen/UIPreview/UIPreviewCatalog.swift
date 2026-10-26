@@ -156,6 +156,18 @@ enum UIPreviewCatalog {
         ))
 
         scenes.append(.init(
+            name: "popover-reconnect-error",
+            presentation: .popover(size: popoverSize),
+            settleTime: 1.0,
+            configure: { state in
+                state.playerState = .error("输出设备未就绪，请连接后点击播放")
+                state.trackStatus.exclusive = false
+                state.volume = 0.1
+            },
+            makeView: { AnyView(ContentView(initialRoute: .nowPlaying)) }
+        ))
+
+        scenes.append(.init(
             name: "popover-login",
             presentation: .popover(size: popoverSize),
             settleTime: 1.0,

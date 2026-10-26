@@ -213,6 +213,7 @@ public enum AudioDevice {
     /// 可撤销的主队列监听：列表变化，以及设备先失效、后从列表移除的阶段。
     public final class HotplugListener {
         private struct Registration {
+            let token: UUID
             let object: AudioObjectID
             var address: AudioObjectPropertyAddress
             let block: AudioObjectPropertyListenerBlock
@@ -232,13 +233,15 @@ public enum AudioDevice {
             var address = AudioObjectPropertyAddress(mSelector: selector, mScope: scope,
                                                      mElement: kAudioObjectPropertyElementMain)
             guard AudioObjectHasProperty(object, &address) else { return }
+            let token = UUID()
             let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-                guard let self, !self.stopped else { return }
+                guard let self, !self.stopped,
+                      self.registrations.contains(where: { $0.token == token }) else { return }
                 if object == AudioObjectID(kAudioObjectSystemObject) { self.observeDevices() }
                 self.handler(object == AudioObjectID(kAudioObjectSystemObject) ? nil : object)
             }
             if AudioObjectAddPropertyListenerBlock(object, &address, .main, block) == noErr {
-                registrations.append(Registration(object: object, address: address, block: block))
+                registrations.append(Registration(token: token, object: object, address: address, block: block))
             }
         }
 

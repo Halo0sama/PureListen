@@ -154,12 +154,11 @@ struct PopoverTransport: View {
 
     private var detailLine: String {
         let status = state.trackStatus
+        if case let .loading(hint) = state.playerState { return hint }
+        if case let .error(message) = state.playerState { return message }
         guard hasTrack else {
-            if case let .loading(hint) = state.playerState { return hint }
-            if case let .error(message) = state.playerState { return message }
             return "从歌单里挑一首开始"
         }
-        guard hasTrack else { return "" }
         var parts: [String] = []
         if !status.artist.isEmpty { parts.append(status.artist) }
         parts.append("\(levelShort) \(rateShort)")

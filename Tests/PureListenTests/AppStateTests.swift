@@ -316,4 +316,118 @@ final class AppStateTests: XCTestCase {
         XCTAssertNil(state.playbackTask)
     }
 
+    private func cachedAudio() throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".wav")
+        try Data("cached-audio-test".utf8).write(to: url)
+        return url
+    }
+
+    func testReinsertPlaysCachedAudioAfterBrowseListAndIndexAreGone() throws {
+        let (state, defaults, suite) = makeState()
+        let url = try cachedAudio()
+        defer { state.shutdown(); defaults.removePersistentDomain(forName: suite); try? FileManager.default.removeItem(at: url) }
+        state.reconcileDevices([dac()])
+        var calls: [(URL, String, Double?)] = []
+        state.startLocalAudio = { [weak state] url, status, position in
+            calls.append((url, status.title, position))
+            state?.trackStatus = status
+            state?.playerState = .playing
+        }
+        var metadata = ExclusivePlayer.TrackStatus()
+        metadata.title = "last playing song"
+        state.beginLocalPlayback(url: url, metadata: metadata, resumeAt: nil)
+        state.trackStatus.positionSeconds = 37.5
+        state.currentItem = nil
+        state.tracks = []
+        state.currentIndex = -1
+        state.volume = 0.8
+        state.reconcileDevices([])
+        state.reconcileDevices([dac(303)])
+        XCTAssertEqual(calls.count, 1) // 重插本身不能播放。
+        XCTAssertEqual(state.suspendedPlaybackPosition, 37.5)
+        state.playPause()
+        XCTAssertEqual(calls.count, 2)
+        XCTAssertEqual(calls.last?.0, url)
+        XCTAssertEqual(calls.last?.1, metadata.title)
+        XCTAssertEqual(calls.last?.2, 37.5)
+        XCTAssertEqual(state.player.deviceID, 303)
+        XCTAssertEqual(state.volume, 0.1)
+        XCTAssertEqual(state.playerState, .playing)
+        XCTAssertNil(state.suspendedPlaybackPosition)
+    }
+
+    func testStalePausedOrLoadingUIRebuildsIdleEngineFromLocalAudio() throws {
+        for staleState in [ExclusivePlayer.State.paused, .loading("old request"), .playing] {
+            let (state, defaults, suite) = makeState()
+            let url = try cachedAudio()
+            defer { state.shutdown(); defaults.removePersistentDomain(forName: suite); try? FileManager.default.removeItem(at: url) }
+            var starts = 0
+            var resumedAt: Double?
+            state.startLocalAudio = { [weak state] _, _, position in starts += 1; resumedAt = position; state?.playerState = .playing }
+            var metadata = ExclusivePlayer.TrackStatus()
+            metadata.title = "cached"
+            state.beginLocalPlayback(url: url, metadata: metadata, resumeAt: nil)
+            state.trackStatus.positionSeconds = 19
+            state.playerState = staleState
+            XCTAssertEqual(state.player.state, .idle)
+            XCTAssertNil(state.playbackTask)
+            state.playPause()
+            XCTAssertEqual(starts, 2)
+            XCTAssertEqual(resumedAt, 19)
+            XCTAssertEqual(state.playerState, .playing)
+        }
+    }
+
+    func testClickRefreshesReinsertedDeviceAndRetainsProgressWhileOffline() throws {
+        let (state, defaults, suite) = makeState(["devicePinned": true, "deviceUID": "dac"])
+        let url = try cachedAudio()
+        defer { state.shutdown(); defaults.removePersistentDomain(forName: suite); try? FileManager.default.removeItem(at: url) }
+        var available = [dac()]
+        state.outputDeviceSnapshot = { available }
+        state.refreshDevices()
+        var starts = 0
+        var position: Double?
+        state.startLocalAudio = { _, _, resume in starts += 1; position = resume }
+        var metadata = ExclusivePlayer.TrackStatus()
+        metadata.title = "cached"
+        state.beginLocalPlayback(url: url, metadata: metadata, resumeAt: nil)
+        state.trackStatus.positionSeconds = 48
+        available = []
+        state.refreshDevices()
+        state.playPause()
+        guard case .error = state.playerState else { return XCTFail("离线时应显示错误") }
+        XCTAssertEqual(starts, 1)
+        XCTAssertEqual(state.suspendedPlaybackPosition, 48)
+        available = [dac(303)] // 模拟重插通知尚未送到；点击本身必须查到新 ID。
+        state.playPause()
+        XCTAssertEqual(starts, 2)
+        XCTAssertEqual(position, 48)
+        XCTAssertEqual(state.player.deviceID, 303)
+        XCTAssertEqual(state.selectedDevice?.id, 303)
+        XCTAssertFalse(state.autoDevice)
+    }
+
+    func testMissingSourceAfterDisconnectShowsErrorInsteadOfSilentReturn() {
+        let (state, defaults, suite) = makeState()
+        defer { state.shutdown(); defaults.removePersistentDomain(forName: suite) }
+        state.reconcileDevices([dac()])
+        state.trackStatus.title = "remembered metadata only"
+        state.trackStatus.positionSeconds = 9
+        state.reconcileDevices([])
+        state.reconcileDevices([dac(303)])
+        state.playPause()
+        guard case .error = state.playerState else { return XCTFail("没有可恢复音频时应显示错误") }
+    }
+
+    func testDeviceSnapshotRepairsStaleEngineTargetEvenWhenSelectionMatches() {
+        let (state, defaults, suite) = makeState()
+        defer { state.shutdown(); defaults.removePersistentDomain(forName: suite) }
+        state.reconcileDevices([dac(303)])
+        state.player.deviceID = 201
+        state.trackStatus.title = "remembered"
+        state.reconcileDevices([dac(303)])
+        XCTAssertEqual(state.player.deviceID, 303)
+        XCTAssertEqual(state.playerState, .paused)
+    }
+
 }

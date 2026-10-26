@@ -281,6 +281,15 @@ final class AppState: ObservableObject {
     var downloadAudio: (String, String, [String: String]) async throws -> URL = { url, format, headers in
         try await Downloader.ensureLocal(url: url, key: "", format: format, headers: headers)
     }
+    /// 保留当前已加载音频，恢复播放不依赖正在浏览的列表或旧的远程链接。
+    private struct LoadedPlayback {
+        let url: URL
+        let metadata: ExclusivePlayer.TrackStatus
+    }
+    private var loadedPlayback: LoadedPlayback?
+    /// 测试可替换硬件边界；正常运行时由 ExclusivePlayer 播放。
+    var startLocalAudio: ((URL, ExclusivePlayer.TrackStatus, Double?) -> Void)?
+    var outputDeviceSnapshot: (() -> [AudioDeviceInfo])?
 #if DEBUG
     /// 预览/截图用的假二维码内容(不发起网络请求)。
     fileprivate var previewLoginQRContent: String?
@@ -448,6 +457,10 @@ final class AppState: ObservableObject {
     private var hotplugDebounceTask: Task<Void, Never>?
 
     func refreshDevices() {
+        if let outputDeviceSnapshot {
+            reconcileDevices(outputDeviceSnapshot())
+            return
+        }
         guard !previewMode else { return }
         reconcileDevices(AudioDevice.allDevices(), defaultID: SystemOutput.defaultOutputDeviceID())
     }
@@ -462,6 +475,7 @@ final class AppState: ObservableObject {
             chosen = AudioDevice.preferredOutput(in: available, defaultID: defaultID, preferredUID: selectedDevice?.uid)
         }
         let changed = selectedDevice?.uid != chosen?.uid || selectedDevice?.id != chosen?.id
+            || player.deviceID != (chosen?.id ?? 0)
         guard changed else {
             selectedDevice = chosen // 采样率等显示信息可以刷新，不打断播放。
             return
@@ -473,7 +487,8 @@ final class AppState: ObservableObject {
     }
 
     private func suspendForOutputChange() {
-        let hasTrack = currentItem != nil || tracks.indices.contains(currentIndex)
+        let hasTrack = loadedPlayback != nil || currentItem != nil || tracks.indices.contains(currentIndex)
+            || !trackStatus.title.isEmpty
         let position = suspendedPlaybackPosition ?? trackStatus.positionSeconds
         let status = trackStatus
         cancelPendingPlayback() // 晚到的下载、解析和歌词也不能在设备恢复后启动播放。
@@ -504,7 +519,7 @@ final class AppState: ObservableObject {
             selectedDevice = nil
             player.deviceID = 0
         }
-        let available = AudioDevice.allDevices()
+        let available = outputDeviceSnapshot?() ?? (previewMode ? devices : AudioDevice.allDevices())
         if let selectedDevice,
            !available.contains(where: { $0.id == selectedDevice.id && $0.uid == selectedDevice.uid }) {
             reconcileDevices(available, defaultID: SystemOutput.defaultOutputDeviceID())
@@ -657,6 +672,7 @@ final class AppState: ObservableObject {
     func logout() {
         cancelPendingPlayback()
         suspendedPlaybackPosition = nil
+        loadedPlayback = nil
         player.stop()
         currentItem = nil
         itemQueue = []
@@ -695,6 +711,7 @@ final class AppState: ObservableObject {
 
     private func beginPlaybackRequest() -> UUID {
         cancelPendingPlayback()
+        loadedPlayback = nil
         player.stop()
         loadingHint = ""
         return playbackRequestID
@@ -745,8 +762,7 @@ final class AppState: ObservableObject {
                 status.artist = track.artists
                 status.format = result.format
                 status.level = result.level
-                player.playFile(url: local, metadata: status)
-                if let resumeAt, resumeAt > 0.5 { player.seek(to: resumeAt) }
+                beginLocalPlayback(url: local, metadata: status, resumeAt: resumeAt)
             } catch {
                 guard isCurrentPlayback(requestID) else { return }
                 playerState = .error("播放失败: \(error.localizedDescription)")
@@ -776,8 +792,7 @@ final class AppState: ObservableObject {
                 status.artist = item.artist
                 status.format = item.format
                 status.level = item.source.rawValue
-                player.playFile(url: local, metadata: status)
-                if let resumeAt, resumeAt > 0.5 { player.seek(to: resumeAt) }
+                beginLocalPlayback(url: local, metadata: status, resumeAt: resumeAt)
             } catch {
                 guard isCurrentPlayback(requestID) else { return }
                 playerState = .error("播放失败: \(error.localizedDescription)")
@@ -839,9 +854,10 @@ final class AppState: ObservableObject {
 
     /// 点播前重新核对当前设备，不能在断开与防抖之间向旧 ID 输出。
     private func prepareOutputForPlayback() -> Bool {
-        if !previewMode { refreshDevices() }
-        guard previewMode || selectedDevice != nil else {
-            loadingHint = "输出设备未连接，请连接后点击播放"
+        refreshDevices()
+        guard (previewMode && outputDeviceSnapshot == nil) || selectedDevice != nil else {
+            playerState = .error("输出设备未就绪，请连接后点击播放")
+            NCLog.log("[播放控制] 设备未就绪，保留恢复进度")
             return false
         }
         volumeMirror.rebase()
@@ -850,22 +866,59 @@ final class AppState: ObservableObject {
         return true
     }
 
-    func playPause() {
-        if let position = suspendedPlaybackPosition {
-            if let item = currentItem { play(item: item, resumeAt: position) }
-            else if tracks.indices.contains(currentIndex) { play(index: currentIndex, resumeAt: position) }
+    /// 下载完成与断线后的本地恢复共用入口；调用方已确认设备与请求身份。
+    func beginLocalPlayback(url: URL, metadata: ExclusivePlayer.TrackStatus, resumeAt: Double?) {
+        loadedPlayback = LoadedPlayback(url: url, metadata: metadata)
+        if let startLocalAudio {
+            startLocalAudio(url, metadata, resumeAt)
             return
         }
-        switch playerState {
-        case .playing: player.pause()
-        case .paused: player.resume()
-        case .loading:
+        player.playFile(url: url, metadata: metadata)
+        if let resumeAt, resumeAt > 0 { player.seek(to: resumeAt) }
+        synchronizePlayerState()
+    }
+
+    private func synchronizePlayerState() {
+        playerState = player.state
+        trackStatus = player.trackStatus
+        applyMutePolicy()
+        updateMediaKeyTap()
+    }
+
+    func playPause() {
+        NCLog.log("[播放控制] 点击：界面=\(playerState) 引擎=\(player.state) 等待重连=\(suspendedPlaybackPosition != nil) 本地音频=\(loadedPlayback != nil)")
+        // 请求与引擎状态是执行依据；界面状态可能尚未收到旧设备的异步回调。
+        if playbackTask != nil {
             cancelPendingPlayback()
             player.stop()
             playerState = .idle
-        default:
-            if let item = currentItem { play(item: item) }
-            else if !tracks.isEmpty { play(index: max(currentIndex, 0)) }
+            applyMutePolicy()
+            updateMediaKeyTap()
+            return
+        }
+        if player.state == .playing, suspendedPlaybackPosition == nil {
+            player.pause()
+            synchronizePlayerState()
+            return
+        }
+        let position = suspendedPlaybackPosition ?? trackStatus.positionSeconds
+        guard prepareOutputForPlayback() else { return }
+        if player.state == .paused, suspendedPlaybackPosition == nil {
+            player.resume()
+            synchronizePlayerState()
+            return
+        }
+        if let loaded = loadedPlayback, FileManager.default.fileExists(atPath: loaded.url.path) {
+            _ = beginPlaybackRequest()
+            suspendedPlaybackPosition = nil
+            NCLog.log("[播放控制] 从本地音频重建输出，进度=\(position)")
+            beginLocalPlayback(url: loaded.url, metadata: loaded.metadata, resumeAt: position)
+        } else if let item = currentItem {
+            play(item: item, resumeAt: position)
+        } else if !tracks.isEmpty {
+            play(index: min(max(currentIndex, 0), tracks.count - 1), resumeAt: position)
+        } else {
+            playerState = .error("当前音频不可用，请重新选择一首歌")
         }
     }
 
