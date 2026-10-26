@@ -3,32 +3,39 @@ import PureListenCore
 
 // MARK: - Popover 内的「正在播放」
 
-/// 在菜单栏面板里完整实现一份正在播放页：大封面、音质徽标、进度、控制、音量与歌词。
+/// 菜单栏面板内的播放、歌词与链路，所有页面均留在小播放器中。
 /// 顶部「窗口模式」仍然可以打开独立的播放窗口。
-enum NowPlayingPane: Hashable { case player, lyrics }
+enum NowPlayingPane: Hashable, CaseIterable {
+    case player, lyrics, signal
+
+    var title: String {
+        switch self {
+        case .player: return "播放"
+        case .lyrics: return "歌词"
+        case .signal: return "链路"
+        }
+    }
+}
 
 struct PopoverNowPlayingPage: View {
     @EnvironmentObject var state: AppState
     @EnvironmentObject var router: PopoverRouter
 
-    init(initialPane: NowPlayingPane = .player) {
-        _pane = State(initialValue: initialPane)
-    }
-
-    @State private var pane: NowPlayingPane = .player
     @State private var scrubbing: Double?
     @Environment(\.albumTint) private var tint
 
     var body: some View {
         VStack(spacing: DS.Space.m) {
-            DSSegmented(items: [NowPlayingPane.player, NowPlayingPane.lyrics],
-                        title: { $0 == .player ? "播放" : "歌词" },
-                        selection: $pane)
-                .frame(width: 148)
+            DSSegmented(items: NowPlayingPane.allCases,
+                        title: { $0.title },
+                        selection: $router.nowPlayingPane)
+                .frame(width: 222)
 
-            if !hasTrack {
+            if router.nowPlayingPane == .signal {
+                PlaybackSignalView(compact: true)
+            } else if !hasTrack {
                 idle
-            } else if pane == .player {
+            } else if router.nowPlayingPane == .player {
                 playerPane
             } else {
                 LyricsPane(lines: state.lyrics,

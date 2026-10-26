@@ -126,3 +126,14 @@ B站的上下曲及自然播完现在沿当前分 P 队列移动，结束时释�
 证据存于 `dist/verification/hotplug-fix/`。Release 已使用稳定签名保留数据安装至 `/Applications/净听.app`；应用关闭期间的 139 个数据文件升级前后完全相同。重新打开后未自动播放，当前音量确认 10%，账号保持原值；启动时音量偏好按新规则更新。以上硬件验证是程序切换设备，没有物理拔插或听感确认。
 
 实现参考：[Apple 设备存活属性](https://developer.apple.com/documentation/coreaudio/kaudiodevicepropertydeviceisalive)、[注册音频属性监听](https://developer.apple.com/documentation/coreaudio/audioobjectaddpropertylistenerblock(_:_:_:_:))、[注销音频属性监听](https://developer.apple.com/documentation/coreaudio/audioobjectremovepropertylistenerblock(_:_:_:_:))。
+
+
+## 后续改进：小播放器的无损链路
+
+底部浮动播放栏新增「无损链路」按钮，点击直接进入面板内的链路页；正在播放页的分栏改为「播放 / 歌词 / 链路」。路由记住当前分栏，返回时沿用原页面历史；点击曲目封面仍进入播放页。
+
+窗口与小播放器共用 `PlaybackSignalView`，只有排版密度不同。展示真实音源、解码规格、环形缓冲、独占状态、所选设备和输出采样率；小播放器增加紧凑结论卡，说明重采样与数字音量衰减。暂停时明确标注「当前未输出」，不把保留的参数当作正在输出；无曲目时显示空状态。
+
+本次为界面与路由改动，使用 Debug/Release 构建及真实 NSPopover/NSWindow 截图核对。预览覆盖原生无损、192→96 kHz 重采样、暂停、无曲目，以及首页底部入口、播放/歌词页、窗口链路页，均检查浅色和深色；预览使用隔离数据，不启动音频或联网。验证产物位于 `dist/verification/mini-signal/`。
+
+Release 已构建并使用 `PureListen Dev` 签名，安装至 `/Applications/净听.app` 并重新打开；严格签名与安装二进制一致性检查通过。升级前后 139 个应用数据文件完全一致，旧版保留于升级备份目录。本轮生成 18 张界面验证图。

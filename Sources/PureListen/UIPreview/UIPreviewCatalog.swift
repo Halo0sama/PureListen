@@ -117,6 +117,36 @@ enum UIPreviewCatalog {
             }
         ))
 
+        // 小播放器中的共享链路：原生、重采样、暂停与无曲目。
+        for variant in ["native", "resampled", "paused", "idle"] {
+            scenes.append(.init(
+                name: "popover-signal-\(variant)",
+                presentation: .popover(size: popoverSize),
+                settleTime: 1.0,
+                configure: { state in
+                    state.volume = 0.1
+                    if variant == "resampled" {
+                        state.trackStatus.fileRate = 192000
+                        state.trackStatus.fileBits = 24
+                        state.trackStatus.deviceRate = 96000
+                        state.trackStatus.resampled = true
+                        state.trackStatus.level = "hires"
+                    } else if variant == "paused" {
+                        state.playerState = .paused
+                        state.trackStatus.exclusive = false
+                    } else if variant == "idle" {
+                        state.playerState = .idle
+                        state.trackStatus = ExclusivePlayer.TrackStatus()
+                        state.currentIndex = -1
+                    }
+                },
+                makeView: {
+                    AnyView(ContentView(initialRoute: .nowPlaying,
+                                        initialNowPlayingPane: .signal))
+                }
+            ))
+        }
+
         scenes.append(.init(
             name: "popover-settings",
             presentation: .popover(size: popoverSize),

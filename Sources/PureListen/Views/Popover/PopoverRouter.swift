@@ -27,6 +27,7 @@ enum PopoverRoute: Equatable {
 final class PopoverRouter: ObservableObject {
     @Published var route: PopoverRoute = .home
     @Published var tab: PopoverTab = .playlists
+    @Published var nowPlayingPane: NowPlayingPane = .player
 
     /// 简单历史栈: 让"返回"回到进入前的那一页（例如从歌单打开正在播放）。
     private var history: [PopoverRoute] = []
@@ -39,7 +40,10 @@ final class PopoverRouter: ObservableObject {
 
     func openPlaylist() { push(.playlist) }
     func openSearch() { push(.search) }
-    func openNowPlaying() { push(.nowPlaying) }
+    func openNowPlaying(pane: NowPlayingPane = .player) {
+        nowPlayingPane = pane
+        push(.nowPlaying)
+    }
     func openSettings() { push(.settings) }
 
     func back() {

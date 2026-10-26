@@ -111,6 +111,19 @@ struct PopoverTransport: View {
                        compact: true)
                     .transition(.opacity.combined(with: .scale(scale: 0.9)))
             }
+            Button {
+                router.openNowPlaying(pane: .signal)
+            } label: {
+                Label("无损链路", systemImage: "waveform.path")
+                    .font(.system(size: 9.5, weight: .medium))
+                    .foregroundStyle(DS.Palette.textSecondary)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 4)
+                    .background(DS.Palette.surfaceSelected, in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .fixedSize()
+            .help("在小播放器中查看音源到输出设备的完整链路")
         }
         .animation(DS.Motion.quick, value: state.player.bitPerfect)
     }

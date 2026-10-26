@@ -48,6 +48,7 @@ struct PopoverShell: View {
             let router = PopoverRouter()
             router.route = initialRoute
             router.tab = initialTab
+            router.nowPlayingPane = initialNowPlayingPane
             return router
         }())
     }
@@ -105,7 +106,7 @@ struct PopoverShell: View {
             PopoverSearchPage()
                 .transition(.opacity)
         case .nowPlaying:
-            PopoverNowPlayingPage(initialPane: initialNowPlayingPane)
+            PopoverNowPlayingPage()
                 .transition(.opacity)
         case .settings:
             PopoverSettingsPage()
