@@ -75,6 +75,15 @@ enum WindowPreviewScenes {
                 state.volume = 1.0
                 state.playerState = .playing
             },
+
+            scene("window-device-manual") { state in
+                if let device = state.devices.last { state.selectDevice(device) }
+            },
+
+            scene("window-device-offline") { state in
+                state.autoDevice = false
+                state.selectedDevice = nil
+            },
         ]
     }
 }

@@ -14,6 +14,7 @@ struct WindowSidebar: View {
     @Environment(\.albumTint) private var tint
     @Environment(\.dsIsDark) private var isDark
     @Namespace private var highlight
+    @State private var hoveringDevice = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -104,7 +105,7 @@ struct WindowSidebar: View {
     // MARK: 底部状态
 
     private var deviceName: String {
-        state.selectedDevice?.name ?? "未选择输出"
+        state.selectedDevice?.name ?? (state.autoDevice ? "未选择输出" : "指定设备离线")
     }
 
     private var deviceSymbol: String {
@@ -119,9 +120,12 @@ struct WindowSidebar: View {
     }
 
     private var deviceDetail: String {
-        let rate = state.trackStatus.deviceRate > 0
+        guard let device = state.selectedDevice else {
+            return state.autoDevice ? "自动选择 · 点击切换" : "等待连接 · 点击切换"
+        }
+        let rate = state.playerState == .playing && state.trackStatus.deviceRate > 0
             ? state.trackStatus.deviceRate
-            : Int(state.selectedDevice?.currentRate ?? 0)
+            : Int(device.currentRate)
         let routing = state.autoDevice ? "自动跟随" : "手动指定"
         return "\(WindowFormatting.rate(rate)) · \(routing)"
     }
@@ -131,25 +135,48 @@ struct WindowSidebar: View {
             DSSoftDivider()
                 .opacity(0.9)
 
-            VStack(alignment: .leading, spacing: DS.Space.xs + 1) {
-                Text("输出设备")
-                    .dsMicroLabel(DS.Palette.textTertiary)
-                HStack(spacing: DS.Space.s) {
-                    Image(systemName: deviceSymbol)
-                        .font(.system(size: 9.5, weight: .semibold))
+            HStack(spacing: DS.Space.s) {
+                VStack(alignment: .leading, spacing: DS.Space.xs + 1) {
+                    Text("输出设备")
+                        .dsMicroLabel(DS.Palette.textTertiary)
+                    HStack(spacing: DS.Space.s) {
+                        Image(systemName: deviceSymbol)
+                            .font(.system(size: 9.5, weight: .semibold))
+                            .foregroundStyle(DS.Palette.textTertiary)
+                        Text(deviceName)
+                            .font(.system(size: 11.5, weight: .medium))
+                            .tracking(DS.Tracking.tight)
+                            .foregroundStyle(DS.Palette.textPrimary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    Text(deviceDetail)
+                        .font(DS.TypeScale.meta)
                         .foregroundStyle(DS.Palette.textTertiary)
-                    Text(deviceName)
-                        .font(.system(size: 11.5, weight: .medium))
-                        .tracking(DS.Tracking.tight)
-                        .foregroundStyle(DS.Palette.textPrimary)
                         .lineLimit(1)
-                        .truncationMode(.middle)
                 }
-                Text(deviceDetail)
-                    .font(DS.TypeScale.meta)
-                    .foregroundStyle(DS.Palette.textTertiary)
-                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(DS.Palette.textSecondary)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(8)
+            .background {
+                RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
+                    .fill(hoveringDevice ? DS.Palette.surfaceHover : .clear)
+            }
+            .contentShape(Rectangle())
+            .overlay {
+                WindowDeviceMenu(state: state, deviceName: deviceName)
+            }
+            .padding(.horizontal, -8)
+            .onHover { value in
+                withAnimation(DS.Motion.quick) { hoveringDevice = value }
+            }
+            .help("选择输出设备；切换后暂停，点击播放继续")
+            .accessibilityLabel("切换输出设备，当前\(deviceName)")
+            .accessibilityIdentifier("window-output-device-menu")
         }
         .padding(.horizontal, DS.Space.xl)
         .padding(.bottom, DS.Space.xl)
