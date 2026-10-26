@@ -21,6 +21,16 @@ final class AppState: ObservableObject {
     @Published var tracks: [NCTrack] = []
     @Published var currentPlaylist: NCPlaylist?
     @Published var currentIndex: Int = -1
+    @Published private(set) var playbackTracks: [NCTrack] = []
+    @Published private(set) var playbackPlaylist: NCPlaylist?
+    @Published private(set) var playingTrack: NCTrack?
+    @Published var playbackMode: PlaybackMode = .sequential {
+        didSet {
+            defaults.set(playbackMode.rawValue, forKey: "playbackMode")
+            resetShuffle()
+        }
+    }
+    private var shuffleNavigation = ShuffleNavigation()
 
     @Published var playerState: ExclusivePlayer.State = .idle
     @Published var trackStatus = ExclusivePlayer.TrackStatus()
@@ -126,7 +136,12 @@ final class AppState: ObservableObject {
 
     /// 播放收藏里的一个视频(自动解析音频)。
     func playBiliVideo(_ video: BiliClient.FavVideo) {
-        resolveAndPlay(video.bvid, coverFallback: video.cover)
+        let videos = favVideos.contains(where: { $0.bvid == video.bvid }) ? favVideos : [video]
+        itemQueue = videos.map {
+            PlayableItem(id: "favorite:\($0.bvid)", title: $0.title, artist: $0.upper, source: .bilibili,
+                         downloadURL: "", format: "m4a", coverURL: $0.cover, biliInput: $0.bvid, biliPage: 1)
+        }
+        if let selected = itemQueue.first(where: { $0.biliInput == video.bvid }) { play(item: selected) }
     }
 
     // MARK: 搜索
@@ -305,6 +320,7 @@ final class AppState: ObservableObject {
     private var playbackRequestID = UUID()
     private var lyricsTask: Task<Void, Never>?
     /// 下载依赖可替换，便于验证乱序完成和取消，无需启动音频设备。
+    var songURLRequest: ((Int, NCLevel) async throws -> NCSongURL?)?
     var downloadAudio: ((String, String, [String: String]) async throws -> URL)?
     var makeRemoteAudio: (String, String, [String: String]) throws -> RemoteAudioFile = {
         try RemoteAudioFile(url: $0, format: $1, headers: $2)
@@ -332,13 +348,40 @@ final class AppState: ObservableObject {
     /// 当前播放条目封面(网易云取曲目封面, 其他来源取条目封面)。
     var currentCoverURL: String {
         if let item = currentItem { return item.coverURL }
-        guard currentIndex >= 0, tracks.indices.contains(currentIndex) else { return "" }
-        return tracks[currentIndex].coverURL
+        guard let track = playingTrack else { return "" }
+        return track.coverURL.isEmpty ? playbackPlaylist?.coverUrl ?? "" : track.coverURL
     }
     var currentSourceLabel: String {
         if let item = currentItem { return item.source.rawValue }
-        return currentPlaylist != nil ? "网易云·歌单" : "网易云"
+        return playbackPlaylist != nil ? "网易云·歌单" : "网易云"
     }
+    var nowPlayingIdentity: String { currentItem?.id ?? playingTrack.map { "netease:\($0.id)" } ?? "" }
+    var nextPlaybackTitle: String? {
+        guard let index = upcomingIndex else { return nil }
+        if currentItem != nil, itemQueue.indices.contains(index) {
+            let item = itemQueue[index]
+            return item.artist.isEmpty ? item.title : "\(item.title) · \(item.artist)"
+        }
+        guard playbackTracks.indices.contains(index) else { return nil }
+        let track = playbackTracks[index]
+        return track.artists.isEmpty ? track.name : "\(track.name) · \(track.artists)"
+    }
+    private var playbackCount: Int { currentItem == nil ? playbackTracks.count : itemQueue.count }
+    private var playbackIndex: Int {
+        if let item = currentItem { return itemQueue.firstIndex(where: { $0.id == item.id }) ?? 0 }
+        return currentIndex
+    }
+    private var upcomingIndex: Int? {
+        let count = playbackCount, index = playbackIndex
+        guard count > 0, index >= 0 else { return nil }
+        switch playbackMode {
+        case .repeatOne: return index
+        case .shuffle: return shuffleNavigation.upcoming
+        case .repeatAll: return (index + 1) % count
+        case .sequential: return index + 1 < count ? index + 1 : nil
+        }
+    }
+    private func resetShuffle() { shuffleNavigation.reset(count: playbackCount, current: playbackIndex) }
 
     init(defaults: UserDefaults = .standard, previewMode: Bool = false) {
         self.defaults = defaults
@@ -370,6 +413,7 @@ final class AppState: ObservableObject {
         if let raw = defaults.string(forKey: "level"), let saved = NCLevel(rawValue: raw) {
             level = saved
         }
+        playbackMode = PlaybackMode(rawValue: defaults.string(forKey: "playbackMode") ?? "") ?? .sequential
         // 安全默认: 10% 音量起步(位完美需要时用户自己拉满)
         let savedVolume = defaults.object(forKey: "volume") == nil ? 0.1 : defaults.double(forKey: "volume")
         volume = savedVolume.isFinite ? Float(min(max(savedVolume, 0), 1)) : 0.1
@@ -527,7 +571,7 @@ final class AppState: ObservableObject {
     }
 
     private func suspendForOutputChange() {
-        let hasTrack = loadedPlayback != nil || currentItem != nil || tracks.indices.contains(currentIndex)
+        let hasTrack = loadedPlayback != nil || currentItem != nil || playingTrack != nil
             || !trackStatus.title.isEmpty
         let position = suspendedPlaybackPosition ?? trackStatus.positionSeconds
         let status = trackStatus
@@ -725,6 +769,10 @@ final class AppState: ObservableObject {
         tracks = []
         currentPlaylist = nil
         currentIndex = -1
+        playbackTracks = []
+        playbackPlaylist = nil
+        playingTrack = nil
+        resetShuffle()
         client = NCClient()
         startLoginPolling()
     }
@@ -734,7 +782,6 @@ final class AppState: ObservableObject {
     func openPlaylist(_ playlist: NCPlaylist, autoPlay: Bool = false) async {
         let requestID = playbackRequestID
         currentPlaylist = playlist
-        defaults.set(playlist.id, forKey: "lastPlaylistId")
         tracks = []
         let loaded = (try? await client.playlistTracks(playlistId: playlist.id)) ?? []
         guard currentPlaylist?.id == playlist.id else { return }   // 防串台
@@ -774,23 +821,37 @@ final class AppState: ObservableObject {
     }
 
     func play(index: Int, resumeAt: Double? = nil) {
-        guard tracks.indices.contains(index) else { return }
-        guard prepareOutputForPlayback() else { return }
+        playNetease(index: index, queue: tracks, playlist: currentPlaylist, resumeAt: resumeAt, newSelection: true)
+    }
+
+    private func playNetease(index: Int, queue: [NCTrack], playlist: NCPlaylist?,
+                             resumeAt: Double? = nil, newSelection: Bool = false) {
+        guard queue.indices.contains(index), prepareOutputForPlayback() else { return }
         let requestID = beginPlaybackRequest()
         suspendedPlaybackPosition = nil
         currentItem = nil
         itemQueue = []
+        playbackTracks = queue
+        playbackPlaylist = playlist
         currentIndex = index
-        let track = tracks[index]
+        let track = queue[index]
+        playingTrack = track
+        if newSelection { resetShuffle() }
+        if let playlist, playlist.id > 0 { defaults.set(playlist.id, forKey: "lastPlaylistId") }
+        trackStatus = ExclusivePlayer.TrackStatus()
+        trackStatus.title = track.name
+        trackStatus.artist = track.artists
         fetchLyrics(for: track)
         playerState = .loading("取链中…")
         playbackTask = Task {
             defer { finishPlaybackRequest(requestID) }
             do {
                 try Task.checkCancellation()
-                var result = try await client.songURL(id: track.id, level: level)
+                var result: NCSongURL?
+                if let songURLRequest { result = try await songURLRequest(track.id, level) }
+                else { result = try await client.songURL(id: track.id, level: level) }
                 guard isCurrentPlayback(requestID) else { return }
-                if result?.url?.isEmpty != false {
+                if songURLRequest == nil, result?.url?.isEmpty != false {
                     result = try await client.songURLFallback(id: track.id, level: level)
                 }
                 guard isCurrentPlayback(requestID) else { return }
@@ -820,12 +881,23 @@ final class AppState: ObservableObject {
 
     /// 播放一个已解析好的条目(网易/B站/直链)。
     func play(item: PlayableItem, resumeAt: Double? = nil) {
+        playItem(item, resumeAt: resumeAt, newSelection: true)
+    }
+
+    private func playItem(_ item: PlayableItem, resumeAt: Double? = nil, newSelection: Bool = false) {
         guard prepareOutputForPlayback() else { return }
         let requestID = beginPlaybackRequest()
         suspendedPlaybackPosition = nil
         currentItem = item
         if !itemQueue.contains(where: { $0.id == item.id }) { itemQueue = [item] }
         currentIndex = -1
+        playingTrack = nil
+        playbackTracks = []
+        playbackPlaylist = nil
+        if newSelection { resetShuffle() }
+        trackStatus = ExclusivePlayer.TrackStatus()
+        trackStatus.title = item.title
+        trackStatus.artist = item.artist
         lyrics = []
         lyricIndex = -1
         playerState = .loading("缓冲音频…")
@@ -837,7 +909,9 @@ final class AppState: ObservableObject {
                 if item.downloadURL.isEmpty, !item.biliInput.isEmpty {
                     let resolved = try await SourceResolver.resolveBilibili(item.biliInput, pageIndex: item.biliPage,
                                                                            bili: biliClient, quality: biliQuality)
-                    guard isCurrentPlayback(requestID), let ready = resolved.first else { return }
+                    guard isCurrentPlayback(requestID), var ready = resolved.first else { return }
+                    ready.id = item.id
+                    if ready.coverURL.isEmpty { ready.coverURL = item.coverURL }
                     item = ready
                     currentItem = ready
                     if let index = itemQueue.firstIndex(where: { $0.id == ready.id }) { itemQueue[index] = ready }
@@ -900,17 +974,45 @@ final class AppState: ObservableObject {
         }
     }
 
-    func playNext(autoPlay: Bool = true) {
-        if let item = currentItem {
-            guard let index = itemQueue.firstIndex(where: { $0.id == item.id }) else { return }
-            if itemQueue.indices.contains(index + 1) { play(item: itemQueue[index + 1]) }
-            else if autoPlay { cancelPendingPlayback(); player.stop() }
-            return
+    func playNext(autoPlay: Bool = false) {
+        if autoPlay {
+            guard !outputNeedsUserPlay, suspendedPlaybackPosition == nil else { return }
+            refreshDevices()
+            guard !outputNeedsUserPlay, suspendedPlaybackPosition == nil else { return }
         }
-        guard !tracks.isEmpty else { return }
-        let next = currentIndex + 1
-        if next < tracks.count { play(index: next) }
-        else if autoPlay { cancelPendingPlayback(); player.stop() }
+        if autoPlay, playbackMode == .repeatOne { replayCurrent(); return }
+        let count = playbackCount, current = playbackIndex
+        guard count > 0 else { return }
+        if !autoPlay, !prepareOutputForPlayback() { return }
+        let next: Int?
+        switch playbackMode {
+        case .shuffle: next = shuffleNavigation.next(count: count, current: current)
+        case .repeatAll, .repeatOne: next = (current + 1) % count
+        case .sequential: next = current + 1 < count ? current + 1 : nil
+        }
+        if let next { playQueueIndex(next) }
+        else {
+            cancelPendingPlayback()
+            player.stop()
+            synchronizePlayerState()
+        }
+    }
+
+    private func playQueueIndex(_ index: Int) {
+        if currentItem != nil {
+            guard itemQueue.indices.contains(index) else { return }
+            playItem(itemQueue[index])
+        } else { playNetease(index: index, queue: playbackTracks, playlist: playbackPlaylist) }
+    }
+
+    private func replayCurrent() {
+        if let loaded = loadedPlayback, loaded.source != nil {
+            restoreRemotePlayback(loaded, position: 0)
+        } else if let loaded = loadedPlayback, FileManager.default.fileExists(atPath: loaded.url.path) {
+            _ = beginPlaybackRequest()
+            suspendedPlaybackPosition = nil
+            beginLocalPlayback(url: loaded.url, metadata: loaded.metadata, resumeAt: 0)
+        } else { playQueueIndex(playbackIndex) }
     }
 
     /// 点播前重新核对当前设备，不能在断开与防抖之间向旧 ID 输出。
@@ -1053,24 +1155,25 @@ final class AppState: ObservableObject {
             beginLocalPlayback(url: loaded.url, metadata: loaded.metadata, resumeAt: position)
         } else if let item = currentItem {
             play(item: item, resumeAt: position)
-        } else if !tracks.isEmpty {
-            play(index: min(max(currentIndex, 0), tracks.count - 1), resumeAt: position)
+        } else if !playbackTracks.isEmpty {
+            playNetease(index: min(max(currentIndex, 0), playbackTracks.count - 1), queue: playbackTracks,
+                        playlist: playbackPlaylist, resumeAt: position)
         } else {
             playerState = .error("当前音频不可用，请重新选择一首歌")
         }
     }
 
     func playPrevious() {
-        if let item = currentItem {
-            guard let index = itemQueue.firstIndex(where: { $0.id == item.id }) else { return }
-            play(item: itemQueue[max(index - 1, 0)])
-            return
+        let count = playbackCount, current = playbackIndex
+        guard count > 0, current >= 0, prepareOutputForPlayback() else { return }
+        let previous: Int
+        switch playbackMode {
+        case .shuffle: previous = shuffleNavigation.previous(current: current)
+        case .repeatAll, .repeatOne: previous = (current - 1 + count) % count
+        case .sequential: previous = max(current - 1, 0)
         }
-        guard !tracks.isEmpty else { return }
-        play(index: max(currentIndex - 1, 0))
+        playQueueIndex(previous)
     }
-
-    // MARK: - B站登录
 
     func startBiliLogin() {
         biliPollTask?.cancel()
@@ -1152,16 +1255,21 @@ final class AppState: ObservableObject {
         favBusy = false
     }
 
-    /// 把搜索到的歌临时加入当前队列(追加到"搜索结果歌单")。
-    func appendTrack(_ track: NCTrack) -> Int {
-        if currentPlaylist == nil || tracks.isEmpty {
-            // 建一个虚拟"搜索结果"队列
-            currentPlaylist = NCPlaylist(id: -1, name: "搜索结果", coverUrl: "", trackCount: 0, playCount: 0)
-            tracks = []
-        }
-        tracks.append(track)
-        return tracks.count - 1
+    func playSearchTrack(_ track: NCTrack) {
+        let queue = searchResults.contains(where: { $0.id == track.id }) ? searchResults : [track]
+        let index = queue.firstIndex(where: { $0.id == track.id }) ?? 0
+        playNetease(index: index, queue: queue, playlist: nil, newSelection: true)
     }
+
+#if DEBUG
+    func previewPlaybackQueue(_ queue: [NCTrack], playlist: NCPlaylist?, index: Int) {
+        playbackTracks = queue
+        playbackPlaylist = playlist
+        currentIndex = index
+        playingTrack = queue.indices.contains(index) ? queue[index] : nil
+        resetShuffle()
+    }
+#endif
 
     // MARK: - 搜索
 
@@ -1182,11 +1290,10 @@ final class AppState: ObservableObject {
         lyricsTask?.cancel()
         lyrics = []
         lyricIndex = -1
-        guard track.id != 0 else { return }
+        guard track.id != 0, !previewMode else { return }
         lyricsTask = Task {
             guard let result = try? await client.lyrics(id: track.id), !Task.isCancelled,
-                  currentItem == nil, tracks.indices.contains(currentIndex),
-                  tracks[currentIndex].id == track.id else { return }
+                  currentItem == nil, playingTrack?.id == track.id else { return }
             parseLyrics(result.lrc, translation: result.tlyric)
         }
     }

@@ -22,7 +22,7 @@ enum UIPreviewData {
         state.playlists = previewPlaylists()
         state.tracks = previewTracks()
         state.currentPlaylist = state.playlists.first
-        state.currentIndex = 4
+        state.previewPlaybackQueue(state.tracks, playlist: state.currentPlaylist, index: 0)
 
         state.playerState = .playing
         var status = ExclusivePlayer.TrackStatus()

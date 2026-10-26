@@ -10,13 +10,14 @@ struct ContentView: View {
     var initialRoute: PopoverRoute = .home
     var initialTab: PopoverTab = .playlists
     var initialNowPlayingPane: NowPlayingPane = .player
+    var initialVolumeExpanded = false
 
     var body: some View {
         Group {
             if state.isLoggedIn {
                 AlbumTintProvider(url: state.currentCoverURL) {
                     PopoverShell(initialRoute: initialRoute, initialTab: initialTab,
-                                 initialNowPlayingPane: initialNowPlayingPane)
+                                 initialNowPlayingPane: initialNowPlayingPane, initialVolumeExpanded: initialVolumeExpanded)
                 }
             } else {
                 LoginView()
@@ -37,15 +38,17 @@ struct PopoverShell: View {
     var initialRoute: PopoverRoute = .home
     var initialTab: PopoverTab = .playlists
     var initialNowPlayingPane: NowPlayingPane = .player
+    var initialVolumeExpanded = false
     @StateObject private var router: PopoverRouter
 
     init(initialRoute: PopoverRoute = .home, initialTab: PopoverTab = .playlists,
-         initialNowPlayingPane: NowPlayingPane = .player) {
+         initialNowPlayingPane: NowPlayingPane = .player, initialVolumeExpanded: Bool = false) {
         self.initialRoute = initialRoute
         self.initialTab = initialTab
         self.initialNowPlayingPane = initialNowPlayingPane
         _router = StateObject(wrappedValue: {
             let router = PopoverRouter()
+            router.volumeExpanded = initialVolumeExpanded
             router.route = initialRoute
             router.tab = initialTab
             router.nowPlayingPane = initialNowPlayingPane
@@ -69,8 +72,8 @@ struct PopoverShell: View {
                         Color.white
                         LinearGradient(colors: [.white, .clear],
                                        startPoint: .top, endPoint: .bottom)
-                            .frame(height: 38)
-                        Color.clear.frame(height: 112)
+                            .frame(height: 24)
+                        Color.clear.frame(height: 80)
                     }
                 }
             }
@@ -81,10 +84,16 @@ struct PopoverShell: View {
                     .padding(.bottom, 12)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
+            if router.volumeExpanded {
+                PopoverVolumeOverlay()
+                    .padding(.top, 48)
+                    .transition(.opacity.combined(with: .move(edge: .trailing)))
+            }
         }
         .environmentObject(router)
         .frame(width: DS.Size.popoverWidth, height: DS.Size.popoverHeight)
         .animation(DS.Motion.page, value: router.route)
+        .animation(DS.Motion.standard, value: router.volumeExpanded)
         .onAppear {
             // 打开面板时不要让输入框抢到焦点: 用户第一下应该是"看"而不是"输"。
             DispatchQueue.main.async {
@@ -161,6 +170,10 @@ struct PopoverTopBar: View {
                     router.openSettings()
                 }
             }
+            DSGlassIconButton(systemName: state.volume == 0 ? "speaker.slash.fill" : "speaker.wave.2.fill",
+                              help: "音量 \(Int((state.volume * 100).rounded()))%") {
+                router.volumeExpanded.toggle()
+            }
         }
         .padding(.horizontal, DS.Space.popoverPadding)
         .frame(height: 44)
@@ -205,7 +218,7 @@ struct PopoverSettingsPage: View {
         SettingsView(layout: .popover)
             // 给浮动播放台留出空间, 否则最后一张卡片会被玻璃台切在中间。
             .safeAreaInset(edge: .bottom) {
-                Color.clear.frame(height: 112)
+                Color.clear.frame(height: 80)
             }
     }
 }

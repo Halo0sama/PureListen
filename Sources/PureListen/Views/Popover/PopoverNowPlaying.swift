@@ -109,14 +109,7 @@ struct PopoverNowPlayingPage: View {
         .frame(maxWidth: .infinity)
     }
 
-    /// 下一首提示（仅网易云歌单队列；B站/直链队列不显示）。
-    private var nextTrackLine: String? {
-        guard state.currentItem == nil else { return nil }
-        let next = state.currentIndex + 1
-        guard state.tracks.indices.contains(next) else { return nil }
-        let track = state.tracks[next]
-        return track.artists.isEmpty ? track.name : "\(track.name) · \(track.artists)"
-    }
+    private var nextTrackLine: String? { state.nextPlaybackTitle }
 
     private var chips: some View {
         HStack(spacing: 5) {
@@ -166,6 +159,8 @@ struct PopoverNowPlayingPage: View {
             DSIconButton(systemName: "forward.fill", size: 32, iconSize: 14,
                          help: "下一首") { state.playNext() }
         }
+        .frame(maxWidth: .infinity)
+        .overlay(alignment: .leading) { PlaybackModeButton() }
     }
 
     // MARK: 无曲目

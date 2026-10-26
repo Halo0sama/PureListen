@@ -318,7 +318,7 @@ final class AppStateTests: XCTestCase {
         defer { state.shutdown(); defaults.removePersistentDomain(forName: suite) }
         state.reconcileDevices([dac()])
         state.tracks = [NCTrack(id: 1, name: "track", artists: "artist", album: "album", durationMs: 120000, vipOnly: false)]
-        state.currentIndex = 0
+        state.previewPlaybackQueue(state.tracks, playlist: nil, index: 0)
         state.trackStatus.positionSeconds = 9
         state.playerState = .paused
         state.reconcileDevices([speakers])

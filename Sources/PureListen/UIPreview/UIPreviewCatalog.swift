@@ -37,7 +37,7 @@ enum UIPreviewCatalog {
             configure: { state in
                 state.playerState = .idle
                 state.trackStatus = ExclusivePlayer.TrackStatus()
-                state.currentIndex = -1
+                state.previewPlaybackQueue([], playlist: nil, index: -1)
                 state.currentItem = nil
                 state.lyrics = []
                 state.volume = 0.25
@@ -67,7 +67,7 @@ enum UIPreviewCatalog {
         ))
 
         scenes.append(.init(name: "refinement-neutral-tracks", presentation: .popover(size: popoverSize),
-                            configure: { state in state.currentIndex = -1 },
+                            configure: { state in state.previewPlaybackQueue([], playlist: nil, index: -1) },
                             makeView: { AnyView(ContentView(initialRoute: .playlist)) }))
         scenes.append(.init(name: "refinement-bili-folders", presentation: .popover(size: popoverSize),
                             configure: { state in
@@ -92,6 +92,25 @@ enum UIPreviewCatalog {
                                 state.trackStatus.downloadFraction = 0.55
                                 state.trackStatus.downloadedBytes = state.trackStatus.sizeBytes / 2
                             }, makeView: { AnyView(ContentView(initialRoute: .nowPlaying)) }))
+
+        scenes.append(.init(name: "controls-volume-expanded", presentation: .popover(size: popoverSize),
+                            configure: { state in state.volume = 0.1 },
+                            makeView: { AnyView(ContentView(initialVolumeExpanded: true)) }))
+        scenes.append(.init(name: "controls-browsing-other-playlist", presentation: .popover(size: popoverSize),
+                            configure: { state in
+                                state.currentPlaylist = state.playlists[2]
+                                state.tracks = Array(state.tracks.reversed())
+                            }, makeView: { AnyView(ContentView(initialRoute: .playlist)) }))
+        scenes.append(.init(name: "controls-shuffle", presentation: .popover(size: popoverSize),
+                            configure: { state in state.playbackMode = .shuffle },
+                            makeView: { AnyView(ContentView(initialRoute: .nowPlaying)) }))
+        scenes.append(.init(name: "controls-repeat-one", presentation: .popover(size: popoverSize),
+                            configure: { state in state.playbackMode = .repeatOne },
+                            makeView: { AnyView(ContentView()) }))
+
+        scenes.append(.init(name: "controls-list-scrolled", presentation: .popover(size: popoverSize),
+                            settleTime: 1.4, configure: { _ in },
+                            makeView: { AnyView(ControlsScrolledPreview()) }))
 
         // MARK: 统一搜索页(空状态 / 已有关键词与结果 / 链接直达)
 
@@ -164,7 +183,7 @@ enum UIPreviewCatalog {
                     } else if variant == "idle" {
                         state.playerState = .idle
                         state.trackStatus = ExclusivePlayer.TrackStatus()
-                        state.currentIndex = -1
+                        state.previewPlaybackQueue([], playlist: nil, index: -1)
                     }
                 },
                 makeView: {
@@ -312,4 +331,15 @@ private struct GlassLensPreview: View {
     }
 }
 
+private struct ControlsScrolledPreview: View {
+    @EnvironmentObject var state: AppState
+    var body: some View {
+        ScrollViewReader { proxy in
+            ContentView().task {
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                if state.playlists.count > 3 { proxy.scrollTo(state.playlists[3].id, anchor: .top) }
+            }
+        }
+    }
+}
 #endif

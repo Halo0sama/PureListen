@@ -58,13 +58,6 @@ struct WindowHeroPage: View {
         state.trackStatus.format.uppercased()
     }
 
-    private var nextTrack: NCTrack? {
-        guard state.currentItem == nil else { return nil }
-        let next = state.currentIndex + 1
-        guard state.tracks.indices.contains(next) else { return nil }
-        return state.tracks[next]
-    }
-
     /// 封面尺寸随窗口收缩, 但保持在 260…300 的观感区间内。
     private func artSize(for size: CGSize) -> CGFloat {
         let byWidth = size.width * 0.37
@@ -206,6 +199,8 @@ struct WindowHeroPage: View {
                 .opacity(hasTrack ? 1 : 0.35)
                 .disabled(!hasTrack)
         }
+        .padding(.horizontal, 54)
+        .overlay(alignment: .leading) { PlaybackModeButton(size: 30) }
     }
 
     private var volumeBlock: some View {
@@ -217,11 +212,11 @@ struct WindowHeroPage: View {
 
     @ViewBuilder
     private var nextUp: some View {
-        if let next = nextTrack {
+        if let next = state.nextPlaybackTitle {
             HStack(spacing: DS.Space.s) {
                 Text("接下来")
                     .dsMicroLabel(DS.Palette.textTertiary)
-                Text("\(next.name) · \(next.artists)")
+                Text(next)
                     .font(DS.TypeScale.meta)
                     .foregroundStyle(DS.Palette.textSecondary.opacity(0.9))
                     .lineLimit(1)

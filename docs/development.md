@@ -212,3 +212,15 @@ Release 已沿用 PureListen Dev 稳定签名安装到 `/Applications/净听.app
 接口依据：[AudioFileOpenWithCallbacks](https://developer.apple.com/documentation/audiotoolbox/audiofileopenwithcallbacks(_:_:_:_:_:_:_:))、[ExtAudioFileWrapAudioFileID](https://developer.apple.com/documentation/audiotoolbox/extaudiofilewrapaudiofileid(_:_:_:)) 及本机 AudioToolbox SDK 头文件的所有权约定；被包装的 AudioFileID 保持打开直到 ExtAudioFileDispose 完成。
 
 最终 Release 已保留数据安装到 `/Applications/净听.app`，稳定签名与安装文件一致性检查通过；升级前后 36 个既有应用数据文件完全一致。本次原版本备份在 `~/Library/Application Support/PureListen Upgrades/20261027-022219.osO3Xf/`，最终替换前的包备份在 `20261027-022525.NGoFG3/`。临时真实音源地址与认证资料已清理，验证日志只保留规格、字节数、耗时和测试结果。
+
+
+## 播放队列隔离、模式与精简控制（2026-10-27）
+
+- 列表顶部恢复 4pt 内容边距，渐隐缩到 12pt，并关闭叠加的系统顶部边缘模糊；到顶时完全不透明，滚动前 12pt 随距离逐渐出现渐隐。播放栏移除音量行和链路入口，按新的栏高收紧内容底部留白。
+- 顶栏设置右侧增加音量按钮；点击展开沿内容区贯穿到底部的竖向玻璃音量条，支持点击/拖动、静音与恢复、百分比和辅助功能增减。点击外部或导航关闭。完整播放页和窗口原有音量控制保留。
+- 增加顺序、列表循环、单曲循环和随机播放，选择保存到偏好。播放栏、完整播放页及窗口均可点按模式图标循环切换，右键可直接选择。随机顺序一轮内遍历队列，上一首/下一首沿实际历史导航，循环交界避免紧接着重复当前曲目。单曲自然结束复用已加载音频；手动下一首仍换歌。设备干预后的等待状态不会被自然曲终恢复播放，离线点击不会消耗随机候选。
+- 将浏览的 `tracks/currentPlaylist` 与 `playbackTracks/playbackPlaylist/playingTrack` 分开；封面、环境取色、上下曲、下一首提示、当前行标记和歌词响应校验均以播放快照为准。搜索建立独立播放队列，B 站收藏夹点击建立视频快照队列，后续分 P 仍按需取链；浏览别的歌单或收藏夹不会重写当前曲目。上次歌单偏好在开始播放时写入。
+
+普通回归套件通过 81 项，5 项需外部条件的测试默认跳过。新增用例覆盖浏览/取链期间更换页面仍保留封面与队列、搜索隔离、首尾循环、单曲复用本地音频、随机遍历与历史、偏好保存、断连保护及离线随机导航。另显式运行 DTC 480 零音量自然曲终测试：单曲在同一个本地音频上重播且只下载一次，切到列表循环后 A → B → A，IO 样本全零，设备原采样率/静音及独占状态还原。截图包含到顶/已滚动列表、展开音量、单曲与随机图标、浏览另一歌单时保留播放信息，以及完整窗口的浅/深色外观。证据在 `dist/verification/queue-controls/`。
+
+Release 已沿用 PureListen Dev 稳定签名安装到 `/Applications/净听.app`；严格签名、二进制和 plist 一致性检查通过，升级前后 47 个既有应用数据文件完全一致。原包与偏好备份位于 `~/Library/Application Support/PureListen Upgrades/20261027-032449.bu3lH9/`。

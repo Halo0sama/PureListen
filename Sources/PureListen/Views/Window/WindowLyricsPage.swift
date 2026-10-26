@@ -45,7 +45,7 @@ struct WindowLyricsPage: View {
             .mask(edgeFade)
             .onAppear { center(on: proxy, animated: false) }
             .onChange(of: state.lyricIndex) { _, _ in center(on: proxy, animated: true) }
-            .onChange(of: state.currentIndex) { _, _ in
+            .onChange(of: state.nowPlayingIdentity) { _, _ in
                 // 切歌: 新歌词到达前先回到开头。
                 Task { @MainActor in
                     try? await Task.sleep(nanoseconds: 60_000_000)

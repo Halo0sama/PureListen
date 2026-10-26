@@ -435,29 +435,34 @@ extension View {
 }
 
 struct ScrollContentFade: ViewModifier {
-    var top: CGFloat = 24
+    var top: CGFloat = 12
     var bottom: CGFloat = 0
+    @State private var fadeAmount: Double = 0
+
     func body(content: Content) -> some View {
         content
-            .contentMargins(.top, top, for: .scrollContent)
+            .contentMargins(.top, 4, for: .scrollContent)
+            .scrollEdgeEffectHidden(true, for: .top)
+            .onScrollGeometryChange(for: Double.self) { geometry in
+                min(max(Double(geometry.contentOffset.y + geometry.contentInsets.top) / 12, 0), 1)
+            } action: { _, value in fadeAmount = value }
             .mask {
-            VStack(spacing: 0) {
-                if top > 0 {
-                    LinearGradient(colors: [.clear, .white], startPoint: .top, endPoint: .bottom)
-                        .frame(height: top)
-                }
-                Color.white
-                if bottom > 0 {
-                    LinearGradient(colors: [.white, .clear], startPoint: .top, endPoint: .bottom)
-                        .frame(height: bottom)
+                VStack(spacing: 0) {
+                    LinearGradient(colors: [.white.opacity(1 - fadeAmount), .white],
+                                   startPoint: .top, endPoint: .bottom)
+                        .frame(height: min(top, 12))
+                    Color.white
+                    if bottom > 0 {
+                        LinearGradient(colors: [.white, .clear], startPoint: .top, endPoint: .bottom)
+                            .frame(height: bottom)
+                    }
                 }
             }
-        }
     }
 }
 
 extension View {
-    func dsScrollFade(top: CGFloat = 24, bottom: CGFloat = 0) -> some View {
+    func dsScrollFade(top: CGFloat = 12, bottom: CGFloat = 0) -> some View {
         modifier(ScrollContentFade(top: top, bottom: bottom))
     }
 }

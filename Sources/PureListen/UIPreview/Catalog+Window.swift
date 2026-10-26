@@ -62,7 +62,7 @@ enum WindowPreviewScenes {
             scene("window-idle") { state in
                 state.playerState = .idle
                 state.trackStatus = ExclusivePlayer.TrackStatus()
-                state.currentIndex = -1
+                state.previewPlaybackQueue([], playlist: nil, index: -1)
                 state.currentItem = nil
                 state.tracks = []
                 state.currentPlaylist = nil

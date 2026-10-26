@@ -15,7 +15,6 @@ struct PopoverTransport: View {
         VStack(spacing: 6) {
             seekRow
             trackRow
-            volumeRow
         }
         .padding(.horizontal, 12)
         .padding(.top, 7)
@@ -86,6 +85,7 @@ struct PopoverTransport: View {
             Spacer(minLength: DS.Space.xs)
 
             HStack(spacing: DS.Space.xs) {
+                PlaybackModeButton(size: 23)
                 DSIconButton(systemName: "backward.fill", size: 26, iconSize: 11,
                              help: "上一首") { state.playPrevious() }
                     .disabled(!hasTrack)
@@ -96,50 +96,6 @@ struct PopoverTransport: View {
                     .disabled(!hasTrack)
                     .opacity(hasTrack ? 1 : 0.4)
             }
-        }
-    }
-
-    // MARK: 音量
-
-    private var volumeRow: some View {
-        HStack(spacing: DS.Space.s) {
-            DSVolumeBar(volume: Double(state.volume), tint: tint) { value in
-                state.setManualVolume(Float(value))
-            }
-            if hasTrack, state.player.bitPerfect {
-                DSChip(text: "位完美", systemImage: "checkmark.seal.fill", tone: .mint,
-                       compact: true)
-                    .transition(.opacity.combined(with: .scale(scale: 0.9)))
-            }
-            Button {
-                router.openNowPlaying(pane: .signal)
-            } label: {
-                Label("无损链路", systemImage: "waveform.path")
-                    .font(.system(size: 9.5, weight: .medium))
-                    .foregroundStyle(DS.Palette.textSecondary)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 4)
-                    .background(DS.Palette.surfaceSelected, in: Capsule())
-            }
-            .buttonStyle(.plain)
-            .fixedSize()
-            .help("在小播放器中查看音源到输出设备的完整链路")
-        }
-        .animation(DS.Motion.quick, value: state.player.bitPerfect)
-    }
-
-    private var rateShort: String {
-        let status = state.trackStatus
-        guard status.fileRate > 0 else { return "—" }
-        return String(format: "%.4g/%d", Double(status.fileRate) / 1000, status.fileBits)
-    }
-
-    private var levelShort: String {
-        switch state.level {
-        case .hires: return "Hi-Res"
-        case .lossless: return "无损"
-        case .exhigh: return "320k"
-        case .standard: return "128k"
         }
     }
 
@@ -162,7 +118,8 @@ struct PopoverTransport: View {
         }
         var parts: [String] = []
         if !status.artist.isEmpty { parts.append(status.artist) }
-        parts.append("\(levelShort) \(rateShort)")
+        if status.fileRate > 0 { parts.append(WindowFormatting.rate(status.fileRate)) }
+        if !status.level.isEmpty { parts.append(WindowFormatting.levelShort(status.level, fallback: state.level)) }
         return parts.joined(separator: " · ")
     }
 

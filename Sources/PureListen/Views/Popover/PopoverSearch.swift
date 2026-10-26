@@ -149,7 +149,7 @@ struct PopoverSearchPage: View {
             }
             .padding(.bottom, 4)
         }
-        .contentMargins(.bottom, 132, for: .scrollContent)
+        .contentMargins(.bottom, 96, for: .scrollContent)
         .scrollEdgeEffectStyle(.soft, for: .top)
             .dsScrollFade(top: 24)
         .padding(.horizontal, DS.Space.popoverPadding - DS.Space.s)
@@ -217,8 +217,7 @@ private struct SearchTrackRow: View {
 
     var body: some View {
         DSListRow(title: track.name, subtitle: track.artists, height: 46) {
-            let index = state.appendTrack(track)
-            state.play(index: index)
+            state.playSearchTrack(track)
         } leading: {
             CoverArtwork(url: track.coverURL, size: 34, radius: DS.Radius.artSmall,
                          shadow: true, borderOpacity: 0.12)

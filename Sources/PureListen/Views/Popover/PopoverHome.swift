@@ -84,9 +84,9 @@ private struct PlaylistPane: View {
                 }
                 .padding(.bottom, 4)
             }
-            .contentMargins(.bottom, 132, for: .scrollContent)
+            .contentMargins(.bottom, 96, for: .scrollContent)
             .scrollEdgeEffectStyle(.soft, for: .top)
-            .dsScrollFade(top: 38)
+            .dsScrollFade(top: 12)
         }
         .padding(.horizontal, DS.Space.popoverPadding - DS.Space.s)
     }
@@ -172,9 +172,9 @@ private struct BiliPane: View {
                 }
             }
         }
-        .contentMargins(.bottom, 132, for: .scrollContent)
+        .contentMargins(.bottom, 96, for: .scrollContent)
         .scrollEdgeEffectStyle(.soft, for: .top)
-            .dsScrollFade(top: 38)
+            .dsScrollFade(top: 12)
         .task {
             if state.favFolders.isEmpty { await state.loadFavFolders() }
         }
@@ -221,8 +221,8 @@ private struct BiliPane: View {
                     }
                 }
             }
-            .contentMargins(.bottom, 132, for: .scrollContent)
-            .dsScrollFade(top: 38)
+            .contentMargins(.bottom, 96, for: .scrollContent)
+            .dsScrollFade(top: 12)
         }
     }
 }
@@ -270,9 +270,9 @@ struct PopoverTrackList: View {
             }
             .padding(.horizontal, DS.Space.popoverPadding - 6)
         }
-        .contentMargins(.bottom, 132, for: .scrollContent)
+        .contentMargins(.bottom, 96, for: .scrollContent)
         .scrollEdgeEffectStyle(.soft, for: .top)
-            .dsScrollFade(top: 38)
+            .dsScrollFade(top: 12)
     }
 
     @ViewBuilder
@@ -308,7 +308,7 @@ private struct TrackRow: View {
     let track: NCTrack
     let index: Int
 
-    private var isCurrent: Bool { index == state.currentIndex }
+    private var isCurrent: Bool { state.currentItem == nil && state.playingTrack?.id == track.id }
 
     @Environment(\.albumTint) private var tint
 
