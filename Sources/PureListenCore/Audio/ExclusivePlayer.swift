@@ -24,6 +24,9 @@ public final class ExclusivePlayer {
         public var codec: String = ""
         public var sourceHost: String = ""
         public var sourceDetail: String = ""
+        public var downloadedBytes: Int64 = 0
+        public var downloadFraction: Double = 0
+        public var buffering = false
 
         public init() {}
     }
@@ -103,6 +106,7 @@ public final class ExclusivePlayer {
 
     /// 起播/seek 后的淡入帧数(15ms), 消除爆音。
     private var fadeInFrames: Int = 0
+    private var starved = false
     private var framesSinceFadeStart: Int64 = 0
 
     private func startFadeIn() {
@@ -127,6 +131,7 @@ public final class ExclusivePlayer {
     private var ioProcID: AudioDeviceIOProcID?
     private var ring: RingBuffer?
     private var extFile: ExtAudioFileRef?
+    private var preparedAudio: PreparedAudio?
     private var decodeThread: Thread?
     private let stopDecode = Atomic<Bool>(true)
     private let framesPlayed = Atomic<Int64>(0)
@@ -152,7 +157,16 @@ public final class ExclusivePlayer {
 
     /// 播放一个本地音频文件。控制操作需由同一线程串行调用（App 使用主线程）。
     public func playFile(url: URL, metadata: TrackStatus) {
+        play(url: url, prepared: nil, metadata: metadata)
+    }
+
+    public func playPrepared(_ prepared: PreparedAudio, metadata: TrackStatus) {
+        play(url: nil, prepared: prepared, metadata: metadata)
+    }
+
+    private func play(url: URL?, prepared: PreparedAudio?, metadata: TrackStatus) {
         stopPlayback()
+        preparedAudio = prepared
         activeDeviceID = deviceID
         activeDeviceUID = AudioDevice.uid(for: activeDeviceID)
         clampedSampleCount = 0
@@ -323,36 +337,43 @@ public final class ExclusivePlayer {
 
     // MARK: - 核心流程
 
-    private func openAndStart(url: URL) throws {
+    private func openAndStart(url: URL?) throws {
         // 1. 打开文件并读取真实格式
         var file: ExtAudioFileRef?
-        let openStatus = ExtAudioFileOpenURL(url as CFURL, &file)
-        guard openStatus == noErr, let extFileRef = file else {
+        let openStatus: OSStatus
+        if let preparedAudio {
+            file = preparedAudio.file
+            openStatus = noErr
+        } else if let url {
+            openStatus = ExtAudioFileOpenURL(url as CFURL, &file)
+        } else { openStatus = kAudioFileUnspecifiedError }
+        guard openStatus == noErr, file != nil || preparedAudio != nil else {
             throw NSError(domain: "ExclusivePlayer", code: Int(openStatus),
                           userInfo: [NSLocalizedDescriptionKey: "无法打开音频文件"])
         }
+        let extFileRef = file
         extFile = extFileRef
 
         var fileFormat = AudioStreamBasicDescription()
         var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
-        var status = ExtAudioFileGetProperty(extFileRef,
-                                             kExtAudioFileProperty_FileDataFormat,
-                                             &size, &fileFormat)
+        var status: OSStatus
+        if let preparedAudio { fileFormat = preparedAudio.fileFormat; status = noErr }
+        else { status = ExtAudioFileGetProperty(extFileRef!, kExtAudioFileProperty_FileDataFormat, &size, &fileFormat) }
         guard status == noErr else {
             throw NSError(domain: "ExclusivePlayer", code: Int(status),
                           userInfo: [NSLocalizedDescriptionKey: "无法读取音频格式"])
         }
 
         var fileRate = Int(fileFormat.mSampleRate)
-        var fileBits = Int(fileFormat.mBitsPerChannel)
+        var fileBits = preparedAudio?.bits ?? Int(fileFormat.mBitsPerChannel)
         // FLAC 在 FileDataFormat 里报占位值(0bit), 手动读 STREAMINFO 拿真实位深
-        if fileBits == 0, let flac = Self.parseFLACStreamInfo(url) {
+        if fileBits == 0, let url, let flac = Self.parseFLACStreamInfo(url) {
             fileBits = flac.bitsPerSample
             if fileRate == 0 { fileRate = flac.sampleRate }
         }
         trackStatus.fileRate = fileRate
         trackStatus.fileBits = fileBits
-        trackStatus.seconds = totalSeconds(extFileRef, rate: fileRate)
+        trackStatus.seconds = preparedAudio?.seconds ?? totalSeconds(extFileRef!, rate: fileRate)
         NCLog.log(String(format: "[播放] 音源格式: %d Hz / %d bit / %d ch (文件头真实值)",
                          fileRate, fileBits, Int(fileFormat.mChannelsPerFrame)))
 
@@ -406,8 +427,8 @@ public final class ExclusivePlayer {
             NCLog.log("[播放] 设备物理格式（仅诊断）: \(Int(physical.mSampleRate)) Hz / \(physical.mBitsPerChannel) bit / bytesPerFrame=\(physical.mBytesPerFrame)")
         }
         var decoder = clientFormat
-        status = ExtAudioFileSetProperty(extFileRef, kExtAudioFileProperty_ClientDataFormat,
-                                         size, &decoder)
+        if let preparedAudio { status = preparedAudio.configure(decoder) }
+        else { status = ExtAudioFileSetProperty(extFileRef!, kExtAudioFileProperty_ClientDataFormat, size, &decoder) }
         guard status == noErr else {
             throw NSError(domain: "ExclusivePlayer", code: Int(status),
                           userInfo: [NSLocalizedDescriptionKey: "无法设置 Float32 解码输出格式"])
@@ -419,7 +440,9 @@ public final class ExclusivePlayer {
         renderScratch = .allocate(capacity: renderCapacityFrames * channels)
         if ioDumpEnabled { ioDumpStorage = [Float32](repeating: 0, count: ioDumpMaxFrames * channels) }
         ring?.reset()
-        framesPlayed.store(0, ordering: .relaxed)
+        let initialPosition = preparedAudio?.startSeconds ?? 0
+        framesPlayed.store(Int64(initialPosition * Double(trackStatus.deviceRate)), ordering: .relaxed)
+        trackStatus.positionSeconds = initialPosition
         stopDecode.store(false, ordering: .releasing)
 
         reachedEOF = false
@@ -473,7 +496,8 @@ public final class ExclusivePlayer {
     // MARK: - 解码线程
 
     private func decodeLoop(generation currentGeneration: UUID) {
-        guard let extFile, let ring else { return }
+        guard let ring, extFile != nil || preparedAudio != nil else { return }
+        let extFile = self.extFile
         let chunkFrames = 8192
         let bytesPerFrame = Int(clientFormat.mBytesPerFrame)
         var bufferList = AudioBufferList()
@@ -490,10 +514,18 @@ public final class ExclusivePlayer {
             if !reachedEOF && ring.availableToWrite >= chunkFrames {
                 var frames = UInt32(chunkFrames)
                 bufferList.mBuffers.mDataByteSize = UInt32(chunkFrames * bytesPerFrame)
-                let result = ExtAudioFileRead(extFile, &frames, &bufferList)
+                let result = preparedAudio?.read(&frames, &bufferList) ?? ExtAudioFileRead(extFile!, &frames, &bufferList)
                 if result != noErr || frames == 0 {
                     reachedEOF = true
-                    if result != noErr { NCLog.log("[播放] 解码读取失败: OSStatus=\(result)") }
+                    if result != noErr && !stopDecode.load(ordering: .acquiring) {
+                        let message = preparedAudio?.readError?.localizedDescription ?? "音频解码失败 (\(result))"
+                        finishNotified = true
+                        DispatchQueue.main.async { [weak self] in
+                            guard let self, self.generation == currentGeneration else { return }
+                            self.stopPlayback()
+                            self.state = .error(message)
+                        }
+                    }
                 } else {
                     let source = heap.assumingMemoryBound(to: Float32.self)
                     if ioDumpEnabled && decodeDumpCount < ioDumpMaxFrames {
@@ -536,9 +568,11 @@ public final class ExclusivePlayer {
 
     private func ioCallback(_ outputData: UnsafePointer<AudioBufferList>?) -> OSStatus {
         guard let outputData, let ring, let outputPCM, let renderScratch else { return noErr }
+        if starved && ring.availableToRead > 0 { startFadeIn(); starved = false }
         let scratch = UnsafeMutableBufferPointer(start: renderScratch, count: renderCapacityFrames * outputPCM.channels)
         let result = outputPCM.render(ring: ring, output: UnsafeMutablePointer(mutating: outputData),
                                       scratch: scratch, gain: volume * safeGain())
+        if result.frames == 0 { starved = true }
         framesPlayed.wrappingAdd(Int64(result.frames), ordering: .relaxed)
         framesSinceFadeStart += Int64(result.frames)
         clampedSampleCount += result.clamped
@@ -557,6 +591,7 @@ public final class ExclusivePlayer {
     private func stopPlayback() {
         generation = UUID()
         stopDecode.store(true, ordering: .releasing)
+        preparedAudio?.cancelReads()
         if let ioProcID {
             if activeDeviceExists {
                 AudioDeviceStop(activeDeviceID, ioProcID)
@@ -571,7 +606,9 @@ public final class ExclusivePlayer {
         if clampedSampleCount > 0 {
             NCLog.log("[播放] ⚠ 本次播放钳制了 \(clampedSampleCount) 个异常采样")
         }
-        if let extFile { ExtAudioFileDispose(extFile); self.extFile = nil }
+        if let extFile, preparedAudio == nil { ExtAudioFileDispose(extFile) }
+        self.extFile = nil
+        preparedAudio = nil
         renderScratch?.deallocate()
         renderScratch = nil
         outputPCM = nil

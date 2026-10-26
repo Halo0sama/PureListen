@@ -142,7 +142,7 @@ struct PopoverNowPlayingPage: View {
         let position = scrubbing.map { $0 * total } ?? state.trackStatus.positionSeconds
         let fraction = total > 0 ? min(max(position / total, 0), 1) : 0
         return VStack(spacing: 3) {
-            DSSeekBar(progress: fraction, tint: tint, height: 4,
+            DSSeekBar(progress: fraction, tint: tint, height: 4, buffered: state.trackStatus.downloadFraction,
                       onScrub: { value in
                           state.seek(to: value * total)
                           scrubbing = nil

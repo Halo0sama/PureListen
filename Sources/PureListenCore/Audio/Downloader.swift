@@ -21,7 +21,9 @@ public enum Downloader {
     public static func clearCache() {
         let files = (try? FileManager.default.contentsOfDirectory(
             at: cacheDirectory, includingPropertiesForKeys: nil)) ?? []
-        for url in files { try? FileManager.default.removeItem(at: url) }
+        for url in files where !url.lastPathComponent.hasPrefix(".stream-") {
+            try? FileManager.default.removeItem(at: url)
+        }
     }
 
     public static func ensureLocal(url: String, key: String, format: String,

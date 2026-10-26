@@ -53,7 +53,7 @@ public enum FLACContainer {
         return match
     }
 
-    private static func metadata(_ moov: Data) throws -> Data {
+    static func metadata(_ moov: Data) throws -> Data {
         let tracks = try children(moov, in: 0..<moov.count).filter { $0.type == "trak" }
         guard tracks.count == 1 else { throw invalid() }
         let media = try child("mdia", of: tracks[0], in: moov)

@@ -39,7 +39,7 @@ struct PopoverTransport: View {
                 .foregroundStyle(DS.Palette.textTertiary)
                 .frame(width: 34, alignment: .leading)
             DSSeekBar(progress: fraction, tint: tint, height: 3,
-                      showsThumbAlways: false,
+                      showsThumbAlways: false, buffered: state.trackStatus.downloadFraction,
                       onScrub: { value in
                           state.seek(to: value * total)
                           scrubbing = nil
@@ -156,6 +156,7 @@ struct PopoverTransport: View {
         let status = state.trackStatus
         if case let .loading(hint) = state.playerState { return hint }
         if case let .error(message) = state.playerState { return message }
+        if status.buffering { return "缓冲中…" }
         guard hasTrack else {
             return "从歌单里挑一首开始"
         }

@@ -434,6 +434,7 @@ struct DSSeekBar: View {
     var tint: Color
     var height: CGFloat = 4
     var showsThumbAlways: Bool = false
+    var buffered: Double = 0
     var onScrub: (Double) -> Void = { _ in }
     var onScrubbing: ((Double) -> Void)? = nil
 
@@ -452,6 +453,9 @@ struct DSSeekBar: View {
                 Capsule(style: .continuous)
                     .fill(DS.Palette.surfaceSelected)
                     .frame(height: trackHeight)
+                Capsule(style: .continuous)
+                    .fill(DS.Palette.textTertiary.opacity(0.38))
+                    .frame(width: width * min(max(buffered.isFinite ? buffered : 0, 0), 1), height: trackHeight)
                 Capsule(style: .continuous)
                     .fill(LinearGradient(colors: [tint, tint.opacity(0.85)],
                                          startPoint: .leading, endPoint: .trailing))

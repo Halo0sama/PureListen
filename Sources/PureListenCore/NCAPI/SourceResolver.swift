@@ -24,16 +24,20 @@ public struct PlayableItem: Identifiable, Equatable {
     public var codec: String
     public var quality: String
     public var sizeBytes: Int64
+    public var biliInput: String
+    public var biliPage: Int
 
     public init(id: String = UUID().uuidString, title: String, artist: String,
                 source: Source, downloadURL: String, format: String,
                 headers: [String: String] = [:], coverURL: String = "",
                 detail: String = "", neteaseID: Int = 0,
-                bitrate: Int = 0, codec: String = "", quality: String = "", sizeBytes: Int64 = 0) {
+                bitrate: Int = 0, codec: String = "", quality: String = "", sizeBytes: Int64 = 0,
+                biliInput: String = "", biliPage: Int = 0) {
         self.id = id; self.title = title; self.artist = artist; self.source = source
         self.downloadURL = downloadURL; self.format = format; self.headers = headers
         self.coverURL = coverURL; self.detail = detail; self.neteaseID = neteaseID
         self.bitrate = bitrate; self.codec = codec; self.quality = quality; self.sizeBytes = sizeBytes
+        self.biliInput = biliInput; self.biliPage = biliPage
     }
 }
 
@@ -196,6 +200,12 @@ public enum SourceResolver {
         for (index, page) in pages.enumerated() {
             try Task.checkCancellation()
             if let requestedPage, index != requestedPage - 1 { continue }
+            if requestedPage == nil, index > 0 {
+                items.append(PlayableItem(id: "\(bv)-\(page.cid)", title: title, artist: owner, source: .bilibili,
+                    downloadURL: "", format: "", coverURL: pic, detail: page.part,
+                    biliInput: bv, biliPage: index + 1))
+                continue
+            }
             let play = try await httpGetJSON(
                 "https://api.bilibili.com/x/player/playurl?\(query)&cid=\(page.cid)&fnval=4048&fnver=0&qn=127&fourk=1",
                 headers: headers)
@@ -218,7 +228,7 @@ public enum SourceResolver {
             }
             guard let audioURL else { continue }
             items.append(PlayableItem(
-                title: title,
+                id: "\(bv)-\(page.cid)", title: title,
                 artist: owner,
                 source: .bilibili,
                 downloadURL: audioURL,
@@ -226,7 +236,8 @@ public enum SourceResolver {
                 headers: headers,
                 coverURL: pic,
                 detail: page.part,
-                bitrate: bitrate, codec: codec, quality: quality))
+                bitrate: bitrate, codec: codec, quality: quality,
+                biliInput: bv, biliPage: index + 1))
         }
         if items.isEmpty {
             throw NSError(domain: "Bili", code: 3,

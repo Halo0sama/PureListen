@@ -438,7 +438,9 @@ struct ScrollContentFade: ViewModifier {
     var top: CGFloat = 24
     var bottom: CGFloat = 0
     func body(content: Content) -> some View {
-        content.mask {
+        content
+            .contentMargins(.top, top, for: .scrollContent)
+            .mask {
             VStack(spacing: 0) {
                 if top > 0 {
                     LinearGradient(colors: [.clear, .white], startPoint: .top, endPoint: .bottom)

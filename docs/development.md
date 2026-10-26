@@ -193,3 +193,22 @@ Release 已保留数据安装到 `/Applications/净听.app` 并重新打开，�
 验证：`swift test` 共 65 项通过，2 项外部条件测试默认跳过；显式指定真实 B 站 FLAC 的完整前两段容器作为样本，额外通过解封装和 CoreAudio 解码测试：96 kHz、24 bit、双声道，读取 131072 个有效 PCM 帧，不打开音频设备。样本为 HTTP Range 获取的约 2 MB，仅验证开头片段，不代表整首文件或实际耳机听感。直连实测账号头像、收藏夹封面、普通音轨和 FLAC 音轨字段均可取得。深浅色真实 NSPopover/NSWindow 截图覆盖无彩色封面、按下透镜、B 站收藏夹与内页、设置、完整播放页和链路。证据在 `dist/verification/interface-audio-refinement/`。
 
 Release 已沿用 PureListen Dev 稳定签名安装到 `/Applications/净听.app`；严格签名、二进制和 plist 一致性检查通过，升级前后 35 个既有应用数据文件完全一致。旧包与偏好备份保存在 `~/Library/Application Support/PureListen Upgrades/20261027-003709.59B4Mr/`（本次首轮替换前的旧版另保存在 `20261027-003547.jxWmGq/`）。
+
+
+## 渐隐边界与边播放边下载（2026-10-27）
+
+列表顶部按渐隐区高度增加滚动内容的上边距，首项在到顶时恰好位于完整不透明区；滚动后内容仍可进入顶部渐隐区。深浅色截图覆盖歌单、曲目、B 站收藏夹及内页，另核对带缓存进度和缓冲提示的完整播放页。
+
+播放默认不再等待 `Downloader.ensureLocal` 完整返回。`RemoteAudioFile` 使用直连/系统代理偏好的 URLSession 将响应持续写入临时磁盘文件，区间表记录已到达的数据；后台解码读取缺失区间时等待数据，远处读取优先发送有界 Range，并严格核对 206、Content-Range 和 ETag。服务器不支持 Range 时回到顺序等待。只有响应完整结束、字节长度匹配时才原子发布完整缓存；取消和失败不将半截数据伪装成缓存。旧缓存名称及登录数据保持兼容，清理缓存时跳过正在写入的临时文件。
+
+`PreparedAudio` 在后台探测并跳转，普通文件经 AudioFile 读取回调和 ExtAudioFile 解码；FLAC DASH 根据 sidx 和片段头映射为虚拟原生 FLAC，按需读取原始压缩帧。AAC DASH 单独按 moof/trun 取包并使用系统 AudioConverter 解码，避免系统 M4A 文件读取器在起播前扫描整份分段文件。既有 Float32 环形缓冲、独占输出和音量安全规则保留，实时回调没有网络访问或等待；缺数据时保持静音且进度不前移，恢复数据后淡入。解码失败显示错误，不作为正常曲终跳到下一首。
+
+暂停时保留缓冲及下载；拖动在后台重新定位，共用当前下载源。设备断开仍暂停并等手动播放，重新出现后可以从同一个下载源重建解码，不依赖已完成的缓存文件。新曲目、退出或网易云登出取消旧源及阻塞读取。B 站先解析当前分 P，其他分 P 到播放时才取地址，减少起播请求和签名地址过期。
+
+验证记录在 `dist/verification/progressive-playback/`：普通套件 71 项通过，4 项外部条件测试默认跳过；限速本机 HTTP 测试验证未下完整即可解码、远端 Range 跳转、取消唤醒、缓存完整发布与离线复用，以及错误页/截断响应拒绝；另覆盖取消期间的元数据读取唤醒。解码文件句柄集中管理，初始化失败和正常析构均可幂等关闭，回调上下文保留到文件关闭后。AAC 回归使用本机生成正弦信号并由系统 afconvert 编码，构造两个分段进行提前解码测试，不使用第三方解码依赖。
+
+真实音源独立验证：网易云 96 kHz / 24 bit FLAC 约 0.27 秒取得首批 PCM（约 577 KB / 86.1 MB）；B 站 96 kHz / 24 bit FLAC DASH 约 0.29 秒（约 196 KB / 1.76 GB）；B 站 AAC 约 0.22 秒（约 62 KB / 11.3 MB）。这是当前网络下从创建下载源到解码的受控观测，不含此前 API 取链，也不构成固定起播时延保证。未打开声音输出的解码验证与 DTC 480 零音量 IO 验证分开：AAC、Hi-Res 均完成播放、暂停、跳到 20 秒、模拟断开/重连、显式续播；有效解码样本非零，实际 IO 全零，下载源只创建一次，设备采样率、硬件 mute 和独占状态还原。设备事件是模拟快照，未执行物理拔插或耳机听感验证。
+
+接口依据：[AudioFileOpenWithCallbacks](https://developer.apple.com/documentation/audiotoolbox/audiofileopenwithcallbacks(_:_:_:_:_:_:_:))、[ExtAudioFileWrapAudioFileID](https://developer.apple.com/documentation/audiotoolbox/extaudiofilewrapaudiofileid(_:_:_:)) 及本机 AudioToolbox SDK 头文件的所有权约定；被包装的 AudioFileID 保持打开直到 ExtAudioFileDispose 完成。
+
+最终 Release 已保留数据安装到 `/Applications/净听.app`，稳定签名与安装文件一致性检查通过；升级前后 36 个既有应用数据文件完全一致。本次原版本备份在 `~/Library/Application Support/PureListen Upgrades/20261027-022219.osO3Xf/`，最终替换前的包备份在 `20261027-022525.NGoFG3/`。临时真实音源地址与认证资料已清理，验证日志只保留规格、字节数、耗时和测试结果。

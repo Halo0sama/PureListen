@@ -305,13 +305,17 @@ final class AppState: ObservableObject {
     private var playbackRequestID = UUID()
     private var lyricsTask: Task<Void, Never>?
     /// 下载依赖可替换，便于验证乱序完成和取消，无需启动音频设备。
-    var downloadAudio: (String, String, [String: String]) async throws -> URL = { url, format, headers in
-        try await Downloader.ensureLocal(url: url, key: "", format: format, headers: headers)
+    var downloadAudio: ((String, String, [String: String]) async throws -> URL)?
+    var makeRemoteAudio: (String, String, [String: String]) throws -> RemoteAudioFile = {
+        try RemoteAudioFile(url: $0, format: $1, headers: $2)
     }
+    private var activeRemoteSource: RemoteAudioFile?
+    private var downloadMonitor: Task<Void, Never>?
     /// 保留当前已加载音频，恢复播放不依赖正在浏览的列表或旧的远程链接。
     private struct LoadedPlayback {
         let url: URL
         let metadata: ExclusivePlayer.TrackStatus
+        var source: RemoteAudioFile? = nil
     }
     private var loadedPlayback: LoadedPlayback?
     /// 测试可替换硬件边界；正常运行时由 ExclusivePlayer 播放。
@@ -440,6 +444,7 @@ final class AppState: ObservableObject {
                 guard let self, self.playbackTask == nil, self.suspendedPlaybackPosition == nil,
                       self.player.playbackID == playbackID else { return }
                 self.trackStatus = status
+                self.updateDownloadStatus()
                 if self.lyricIndex >= 0, self.lyricIndex < self.lyrics.count {
                     self.updateLyricIndex(position: status.positionSeconds)
                 } else {
@@ -708,6 +713,9 @@ final class AppState: ObservableObject {
         cancelPendingPlayback()
         suspendedPlaybackPosition = nil
         loadedPlayback = nil
+        activeRemoteSource?.cancel()
+        activeRemoteSource = nil
+        downloadMonitor?.cancel()
         player.stop()
         currentItem = nil
         itemQueue = []
@@ -744,8 +752,11 @@ final class AppState: ObservableObject {
         quickPlayBusy = false
     }
 
-    private func beginPlaybackRequest() -> UUID {
+    private func beginPlaybackRequest(preserving source: RemoteAudioFile? = nil) -> UUID {
         cancelPendingPlayback()
+        if activeRemoteSource !== source { activeRemoteSource?.cancel() }
+        activeRemoteSource = source
+        downloadMonitor?.cancel()
         loadedPlayback = nil
         player.stop()
         loadingHint = ""
@@ -788,10 +799,7 @@ final class AppState: ObservableObject {
                     return
                 }
                 if let trial = result.freeTrialInfo { loadingHint = trial }
-                playerState = .loading("下载 \(result.format.uppercased()) …")
-                let local = try await downloadAudio(url, result.format, [:])
-                guard isCurrentPlayback(requestID), tracks.indices.contains(index),
-                      tracks[index].id == track.id else { return }
+                playerState = .loading("缓冲 \(result.format.uppercased()) …")
                 var status = ExclusivePlayer.TrackStatus()
                 status.title = track.name
                 status.artist = track.artists
@@ -801,7 +809,8 @@ final class AppState: ObservableObject {
                 status.bitrate = result.br
                 status.sourceHost = URL(string: url)?.host ?? ""
                 status.sourceDetail = track.album
-                beginLocalPlayback(url: local, metadata: status, resumeAt: resumeAt)
+                try await loadAudio(url: url, format: result.format, headers: [:], metadata: status,
+                                    requestID: requestID, resumeAt: resumeAt)
             } catch {
                 guard isCurrentPlayback(requestID) else { return }
                 playerState = .error("播放失败: \(error.localizedDescription)")
@@ -819,18 +828,20 @@ final class AppState: ObservableObject {
         currentIndex = -1
         lyrics = []
         lyricIndex = -1
-        playerState = .loading("取链完成, 下载中…")
+        playerState = .loading("缓冲音频…")
         playbackTask = Task {
             defer { finishPlaybackRequest(requestID) }
             do {
                 try Task.checkCancellation()
-                var local = try await downloadAudio(item.downloadURL, item.format, item.headers)
-                guard isCurrentPlayback(requestID) else { return }
-                if item.codec.lowercased() == "flac" {
-                    playerState = .loading("准备 Hi-Res 音轨…")
-                    local = try await FLACContainer.prepare(local)
+                var item = item
+                if item.downloadURL.isEmpty, !item.biliInput.isEmpty {
+                    let resolved = try await SourceResolver.resolveBilibili(item.biliInput, pageIndex: item.biliPage,
+                                                                           bili: biliClient, quality: biliQuality)
+                    guard isCurrentPlayback(requestID), let ready = resolved.first else { return }
+                    item = ready
+                    currentItem = ready
+                    if let index = itemQueue.firstIndex(where: { $0.id == ready.id }) { itemQueue[index] = ready }
                 }
-                guard isCurrentPlayback(requestID) else { return }
                 var status = ExclusivePlayer.TrackStatus()
                 status.title = item.title
                 status.artist = item.artist
@@ -841,7 +852,8 @@ final class AppState: ObservableObject {
                 status.codec = item.codec
                 status.sourceHost = URL(string: item.downloadURL)?.host ?? ""
                 status.sourceDetail = item.detail
-                beginLocalPlayback(url: local, metadata: status, resumeAt: resumeAt)
+                try await loadAudio(url: item.downloadURL, format: item.format, headers: item.headers,
+                                    metadata: status, requestID: requestID, resumeAt: resumeAt)
             } catch {
                 guard isCurrentPlayback(requestID) else { return }
                 playerState = .error("播放失败: \(error.localizedDescription)")
@@ -915,6 +927,76 @@ final class AppState: ObservableObject {
         return true
     }
 
+    private func loadAudio(url: String, format: String, headers: [String: String],
+                           metadata: ExclusivePlayer.TrackStatus, requestID: UUID, resumeAt: Double?) async throws {
+        if let downloadAudio {
+            var local = try await downloadAudio(url, format, headers)
+            guard isCurrentPlayback(requestID) else { return }
+            if metadata.codec.lowercased() == "flac" { local = try await FLACContainer.prepare(local) }
+            guard isCurrentPlayback(requestID) else { return }
+            beginLocalPlayback(url: local, metadata: metadata, resumeAt: resumeAt)
+            return
+        }
+        let source = try makeRemoteAudio(url, format, headers)
+        activeRemoteSource = source
+        loadedPlayback = LoadedPlayback(url: source.cacheURL, metadata: metadata, source: source)
+        trackStatus = metadata
+        trackStatus.positionSeconds = resumeAt ?? 0
+        monitorDownload(source)
+        try await beginRemotePlayback(source, metadata: metadata, requestID: requestID, position: resumeAt ?? 0)
+    }
+
+    private func beginRemotePlayback(_ source: RemoteAudioFile, metadata: ExclusivePlayer.TrackStatus,
+                                     requestID: UUID, position: Double) async throws {
+        let prepared = try await PreparedAudio.prepare(source: source, format: metadata.format,
+                                                       codec: metadata.codec, position: position)
+        guard isCurrentPlayback(requestID) else { prepared.cancelReads(); return }
+        loadedPlayback = LoadedPlayback(url: source.cacheURL, metadata: metadata, source: source)
+        player.playPrepared(prepared, metadata: metadata)
+        synchronizePlayerState()
+    }
+
+    private func monitorDownload(_ source: RemoteAudioFile) {
+        downloadMonitor?.cancel()
+        downloadMonitor = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self, self.activeRemoteSource === source else { return }
+                self.updateDownloadStatus()
+                if source.snapshot.complete || source.snapshot.error != nil { return }
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+        }
+    }
+
+    private func updateDownloadStatus() {
+        guard let source = activeRemoteSource else { return }
+        let snapshot = source.snapshot
+        trackStatus.downloadedBytes = snapshot.received
+        trackStatus.downloadFraction = snapshot.total > 0 ? min(Double(snapshot.contiguous) / Double(snapshot.total), 1) : 0
+        if snapshot.total > 0 { trackStatus.sizeBytes = snapshot.total }
+        trackStatus.buffering = playerState == .playing && !snapshot.complete && snapshot.error == nil
+            && player.ringStats().available == 0
+    }
+
+    private func restoreRemotePlayback(_ loaded: LoadedPlayback, position: Double) {
+        guard let source = loaded.source else { return }
+        let requestID = beginPlaybackRequest(preserving: source)
+        loadedPlayback = loaded
+        suspendedPlaybackPosition = nil
+        trackStatus = loaded.metadata
+        trackStatus.positionSeconds = position
+        playerState = .loading("缓冲音频…")
+        monitorDownload(source)
+        playbackTask = Task {
+            defer { finishPlaybackRequest(requestID) }
+            do { try await beginRemotePlayback(source, metadata: loaded.metadata, requestID: requestID, position: position) }
+            catch {
+                guard isCurrentPlayback(requestID) else { return }
+                playerState = .error("播放失败: \(error.localizedDescription)")
+            }
+        }
+    }
+
     /// 下载完成与断线后的本地恢复共用入口；调用方已确认设备与请求身份。
     func beginLocalPlayback(url: URL, metadata: ExclusivePlayer.TrackStatus, resumeAt: Double?) {
         var metadata = metadata
@@ -934,6 +1016,7 @@ final class AppState: ObservableObject {
     private func synchronizePlayerState() {
         playerState = player.state
         trackStatus = player.trackStatus
+        updateDownloadStatus()
         applyMutePolicy()
         updateMediaKeyTap()
     }
@@ -961,7 +1044,9 @@ final class AppState: ObservableObject {
             synchronizePlayerState()
             return
         }
-        if let loaded = loadedPlayback, FileManager.default.fileExists(atPath: loaded.url.path) {
+        if let loaded = loadedPlayback, loaded.source != nil {
+            restoreRemotePlayback(loaded, position: position)
+        } else if let loaded = loadedPlayback, FileManager.default.fileExists(atPath: loaded.url.path) {
             _ = beginPlaybackRequest()
             suspendedPlaybackPosition = nil
             NCLog.log("[播放控制] 从本地音频重建输出，进度=\(position)")
@@ -1163,6 +1248,20 @@ final class AppState: ObservableObject {
             trackStatus.positionSeconds = suspendedPlaybackPosition ?? 0
             return
         }
+        if let loaded = loadedPlayback, loaded.source != nil {
+            guard seconds.isFinite else { return }
+            let position = min(max(seconds, 0), max(trackStatus.seconds - 0.001, 0))
+            if playerState == .paused {
+                let status = trackStatus
+                player.stop()
+                trackStatus = status
+                trackStatus.positionSeconds = position
+                suspendedPlaybackPosition = position
+                return
+            }
+            restoreRemotePlayback(loaded, position: position)
+            return
+        }
         player.seek(to: seconds)
         trackStatus.positionSeconds = seconds
     }
@@ -1182,6 +1281,8 @@ final class AppState: ObservableObject {
 
     func shutdown() {
         cancelPendingPlayback()
+        activeRemoteSource?.cancel()
+        downloadMonitor?.cancel()
         qrPollTask?.cancel()
         biliPollTask?.cancel()
         hotplugDebounceTask?.cancel()

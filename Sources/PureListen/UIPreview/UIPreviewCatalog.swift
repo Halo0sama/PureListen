@@ -86,6 +86,13 @@ enum UIPreviewCatalog {
                                 AnyView(ContentView().environment(\.glassLensDebugPoint, CGPoint(x: 70, y: 15)))
                             }))
 
+        scenes.append(.init(name: "stream-buffering", presentation: .popover(size: popoverSize),
+                            configure: { state in
+                                state.trackStatus.buffering = true
+                                state.trackStatus.downloadFraction = 0.55
+                                state.trackStatus.downloadedBytes = state.trackStatus.sizeBytes / 2
+                            }, makeView: { AnyView(ContentView(initialRoute: .nowPlaying)) }))
+
         // MARK: 统一搜索页(空状态 / 已有关键词与结果 / 链接直达)
 
         scenes.append(.init(

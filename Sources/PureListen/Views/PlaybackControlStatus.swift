@@ -13,6 +13,9 @@ struct PlaybackControlStatus: View {
                 .lineLimit(2)
                 .help(message)
                 .padding(.top, 8)
+        } else if state.trackStatus.buffering {
+            Text("缓冲中…")
+                .font(DS.TypeScale.caption).foregroundStyle(DS.Palette.textSecondary).padding(.top, 8)
         } else if case let .loading(message) = state.playerState {
             Text(message)
                 .font(DS.TypeScale.caption)

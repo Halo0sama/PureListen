@@ -124,6 +124,9 @@ struct PlaybackSignalView: View {
             if status.sizeBytes > 0 {
                 networkRow("文件大小", ByteCountFormatter.string(fromByteCount: status.sizeBytes, countStyle: .file))
             }
+            if status.sizeBytes > 0, status.downloadedBytes > 0, status.downloadedBytes < status.sizeBytes {
+                networkRow("已下载", ByteCountFormatter.string(fromByteCount: status.downloadedBytes, countStyle: .file))
+            }
             if status.bitrate > 0 { networkRow("码率", "\(status.bitrate / 1000) kbps") }
             if !status.codec.isEmpty, status.codec.lowercased() != status.format.lowercased() {
                 networkRow("编码", status.codec)
