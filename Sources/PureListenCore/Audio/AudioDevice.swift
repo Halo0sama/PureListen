@@ -229,20 +229,31 @@ public enum AudioDevice {
 
     private static var listeners: [ListenerBox] = []
 
-    /// 首个输出流的物理格式(内置设备通常为 32-bit float 2ch)。
+    /// IOProc 使用虚拟格式；物理格式只描述设备侧数据，不能作为回调缓冲格式。
+    public static func virtualFormat(_ device: AudioDeviceID) -> AudioStreamBasicDescription? {
+        streamFormat(device, selector: kAudioStreamPropertyVirtualFormat)
+    }
+
+    /// 首个输出流的设备物理格式，仅供诊断。
     public static func physicalFormat(_ device: AudioDeviceID) -> AudioStreamBasicDescription? {
-        // 1. 取设备的首个输出流 id
+        streamFormat(device, selector: kAudioStreamPropertyPhysicalFormat)
+    }
+
+    private static func streamFormat(_ device: AudioDeviceID, selector: AudioObjectPropertySelector) -> AudioStreamBasicDescription? {
         var streamsAddress = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyStreams,
             mScope: kAudioDevicePropertyScopeOutput,
             mElement: kAudioObjectPropertyElementMain)
-        var streamID: AudioStreamID = 0
-        var streamSize = UInt32(MemoryLayout<AudioStreamID>.size)
-        guard AudioObjectGetPropertyData(device, &streamsAddress, 0, nil,
-                                         &streamSize, &streamID) == noErr else { return nil }
-        // 2. 取该流的物理格式
+        var streamSize: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(device, &streamsAddress, 0, nil, &streamSize) == noErr,
+              streamSize >= UInt32(MemoryLayout<AudioStreamID>.size) else { return nil }
+        var streams = [AudioStreamID](repeating: 0, count: Int(streamSize) / MemoryLayout<AudioStreamID>.size)
+        let status = streams.withUnsafeMutableBytes {
+            AudioObjectGetPropertyData(device, &streamsAddress, 0, nil, &streamSize, $0.baseAddress!)
+        }
+        guard status == noErr, let streamID = streams.first else { return nil }
         var formatAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioStreamPropertyPhysicalFormat,
+            mSelector: selector,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
         var format = AudioStreamBasicDescription()

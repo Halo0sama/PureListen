@@ -1,6 +1,7 @@
 import Foundation
 import CoreAudio
 import AudioToolbox
+import Synchronization
 
 /// 独占输出播放引擎:
 /// FLAC 本地解码(ExtAudioFile) → 无锁环形缓冲 → IOProc 直写设备(绕过系统混音器)。
@@ -41,15 +42,17 @@ public final class ExclusivePlayer {
     public private(set) var trackStatus = TrackStatus()
 
     public var deviceID: AudioDeviceID = 0
-    /// 调试: 抓取 IOProc 实际写向设备的采样(音量前), 供静音诊断。
-    public private(set) var ioDump: [Float32] = []
+    private var activeDeviceID: AudioDeviceID = 0
+    /// 调试：停止后读取实际写向设备的采样（音量后）；回调中只写预分配存储。
+    public var ioDump: [Float32] { Array(ioDumpStorage.prefix(ioDumpCount)) }
+    private var ioDumpStorage: [Float32] = []
     public var ioDumpEnabled = false
     public private(set) var decodeDump: [Float32] = []
     private var decodeDumpCount = 0
     private var ioDumpCount = 0
     private let ioDumpMaxFrames = 96000 * 3
     public var volume: Float = 1.0 {
-        didSet { volume = min(max(volume, 0), 1) }
+        didSet { volume = volume.isFinite ? min(max(volume, 0), 1) : 0 }
     }
     /// 音量 1.0 时位完美(不做任何乘法)。
     public var bitPerfect: Bool { volume >= 1.0 }
@@ -57,18 +60,19 @@ public final class ExclusivePlayer {
     /// 安全防护: 累计被钳制的异常采样数(诊断用)。
     public private(set) var clampedSampleCount: Int64 = 0
 
-    /// 软件音量只对浮点格式设备安全; 整型物理格式设备跳过音量乘法(整数位当浮点乘=噪音)。
     /// 播放期间接管其余输出设备: 其他 App 在所有设备上都无处发声, 从根源消除漏音。
     public var blockOtherOutputs = true
     private var hoggedOthers: [AudioDeviceID] = []
     /// 当前独占设备的 UID(身份校验: 拔出后设备 ID 会被系统回收复用, 旧 ID 可能指向别的设备)。
     private var activeDeviceUID: String?
-    private var activeDeviceExists: Bool { AudioDevice.uid(for: deviceID) == activeDeviceUID }
+    private var activeDeviceExists: Bool {
+        activeDeviceID != 0 && activeDeviceUID != nil && AudioDevice.uid(for: activeDeviceID) == activeDeviceUID
+    }
 
     private func hogOtherOutputs() {
         releaseOtherOutputs()
         guard blockOtherOutputs else { return }
-        let others = AudioDevice.allDevices().filter { $0.id != deviceID }
+        let others = AudioDevice.allDevices().filter { $0.id != activeDeviceID }
         var taken: [AudioDeviceID] = []
         for device in others {
             if AudioDevice.takeHog(device.id) {
@@ -90,7 +94,6 @@ public final class ExclusivePlayer {
         NCLog.log("[播放] 已释放其余输出设备")
     }
 
-    private var volumeApplies = true
 
     /// 起播/seek 后的淡入帧数(15ms), 消除爆音。
     private var fadeInFrames: Int = 0
@@ -109,28 +112,6 @@ public final class ExclusivePlayer {
         return 1
     }
 
-    /// 输出保险: 非法值钳制(正常音频 |v|≤1, 永不触发, 位完美不受影响)。
-    private func sanitizeOutput(_ p: UnsafeMutablePointer<Float32>, count: Int, gain: Float) {
-        var clamped: Int64 = 0
-        if gain >= 1 {
-            for i in 0..<count {
-                let v = p[i]
-                if v.isNaN || v.isInfinite { p[i] = 0; clamped += 1 }
-                else if v > 1 { p[i] = 1; clamped += 1 }
-                else if v < -1 { p[i] = -1; clamped += 1 }
-            }
-        } else {
-            for i in 0..<count {
-                var v = p[i] * gain
-                if v.isNaN || v.isInfinite { v = 0; clamped += 1 }
-                else if v > 1 { v = 1; clamped += 1 }
-                else if v < -1 { v = -1; clamped += 1 }
-                p[i] = v
-            }
-        }
-        if clamped > 0 { clampedSampleCount += clamped }
-    }
-
     /// 环形缓冲实时状态(供链路可视化): (可用帧, 容量帧)。
     public func ringStats() -> (available: Int, capacity: Int) {
         guard let ring else { return (0, 0) }
@@ -141,9 +122,17 @@ public final class ExclusivePlayer {
     private var ring: RingBuffer?
     private var extFile: ExtAudioFileRef?
     private var decodeThread: Thread?
-    private var stopDecode = false
-    private var framesPlayed: Int64 = 0
+    private let stopDecode = Atomic<Bool>(true)
+    private let framesPlayed = Atomic<Int64>(0)
     private var clientFormat = AudioStreamBasicDescription()
+    private var outputPCM: FloatPCMOutput?
+    private var renderScratch: UnsafeMutablePointer<Float32>?
+    private let renderCapacityFrames = 8192
+    private let decodeLock = NSLock()
+    private var decodeFinished: DispatchGroup?
+    private var reachedEOF = false
+    private var finishNotified = false
+    private var generation = UUID()
 
     public init() {}
 
@@ -153,20 +142,21 @@ public final class ExclusivePlayer {
         stopPlayback()
     }
 
-    /// 播放一个本地音频文件(独占模式)。在任意线程调用。
+    /// 播放一个本地音频文件。控制操作需由同一线程串行调用（App 使用主线程）。
     public func playFile(url: URL, metadata: TrackStatus) {
-        activeDeviceUID = AudioDevice.uid(for: deviceID)
         stopPlayback()
+        activeDeviceID = deviceID
+        activeDeviceUID = AudioDevice.uid(for: activeDeviceID)
         clampedSampleCount = 0
         startFadeIn()
-        ioDump = []
+        ioDumpStorage = []
         decodeDump = []
         ioDumpCount = 0
         decodeDumpCount = 0
         trackStatus = metadata
         onTrackChange?(trackStatus)
 
-        guard deviceID != 0 else {
+        guard activeDeviceID != 0 else {
             state = .error("未选择输出设备")
             return
         }
@@ -175,6 +165,7 @@ public final class ExclusivePlayer {
             try openAndStart(url: url)
             state = .playing
         } catch {
+            stopPlayback()
             state = .error("播放失败: \(error.localizedDescription)")
         }
     }
@@ -182,12 +173,12 @@ public final class ExclusivePlayer {
     /// 暂停: 停止 IO 并释放独占, 系统默认输出自动回连该设备(其他 App 恢复发声)。
     public func pause() {
         guard state == .playing, let ioProcID else { return }
-        AudioDeviceStop(deviceID, ioProcID)
-        AudioDeviceDestroyIOProcID(deviceID, ioProcID)
+        AudioDeviceStop(activeDeviceID, ioProcID)
+        AudioDeviceDestroyIOProcID(activeDeviceID, ioProcID)
         self.ioProcID = nil
-        AudioDevice.releaseHog(deviceID)
-        releaseOtherOutputs()
         restoreOriginalRate()
+        AudioDevice.releaseHog(activeDeviceID)
+        releaseOtherOutputs()
         state = .paused
     }
 
@@ -198,17 +189,25 @@ public final class ExclusivePlayer {
             state = .error("设备已变更(耳机重新插入?), 请重新点播")
             return
         }
-        guard AudioDevice.takeHog(deviceID) else {
+        guard AudioDevice.takeHog(activeDeviceID) else {
             state = .error("设备被其他程序占用, 片刻后再试")
             return
         }
-        if trackStatus.fileRate > 0 {
-            rememberAndSetRate(Double(trackStatus.fileRate))
-        }
         do {
+            guard rememberAndSetRate(Double(trackStatus.deviceRate)),
+                  let virtual = AudioDevice.virtualFormat(activeDeviceID),
+                  Int(virtual.mChannelsPerFrame) == Int(clientFormat.mChannelsPerFrame) else {
+                throw NSError(domain: "ExclusivePlayer", code: -5,
+                              userInfo: [NSLocalizedDescriptionKey: "输出设备格式已变化，请重新播放"])
+            }
+            outputPCM = try FloatPCMOutput(virtualFormat: virtual)
+            decodeLock.lock()
+            finishNotified = false
+            decodeLock.unlock()
             try startIO()
             state = .playing
         } catch {
+            stopPlayback()
             state = .error("恢复播放失败: \(error.localizedDescription)")
         }
     }
@@ -223,18 +222,18 @@ public final class ExclusivePlayer {
     private func startIO() throws {
         var ioProc: AudioDeviceIOProcID?
         let selfPtr = Unmanaged.passUnretained(self).toOpaque()
-        let createStatus = AudioDeviceCreateIOProcID(deviceID, Self.ioCallbackImpl, selfPtr, &ioProc)
+        let createStatus = AudioDeviceCreateIOProcID(activeDeviceID, Self.ioCallbackImpl, selfPtr, &ioProc)
         guard createStatus == noErr, let proc = ioProc else {
             throw NSError(domain: "ExclusivePlayer", code: Int(createStatus),
                           userInfo: [NSLocalizedDescriptionKey: "无法创建音频输出回调"])
         }
-        guard AudioDeviceStart(deviceID, proc) == noErr else {
-            AudioDeviceDestroyIOProcID(deviceID, proc)
+        startFadeIn()
+        guard AudioDeviceStart(activeDeviceID, proc) == noErr else {
+            AudioDeviceDestroyIOProcID(activeDeviceID, proc)
             throw NSError(domain: "ExclusivePlayer", code: -3,
                           userInfo: [NSLocalizedDescriptionKey: "无法启动音频设备(可能被其他 App 独占)"])
         }
         ioProcID = proc
-        startFadeIn()   // 恢复播放淡入, 防爆音
         hogOtherOutputs()   // 同时接管其余输出设备, 其他 App 全静默
     }
 
@@ -255,31 +254,45 @@ public final class ExclusivePlayer {
             return false
         }
         if originalDeviceRate == nil {
-            originalDeviceRate = AudioDevice.nominalSampleRate(deviceID)
+            originalDeviceRate = AudioDevice.nominalSampleRate(activeDeviceID)
         }
-        return AudioDevice.setNominalSampleRate(deviceID, rate)
+        return AudioDevice.setNominalSampleRate(activeDeviceID, rate)
     }
 
     private func restoreOriginalRate() {
+        guard originalDeviceRate != nil else { return }
         guard activeDeviceExists else {
             NCLog.log("[播放] ⚠ 设备已变更(ID 回收?), 跳过采样率恢复")
             originalDeviceRate = nil
             return
         }
-        if let rate = originalDeviceRate, AudioDevice.hasProperty(deviceID, kAudioDevicePropertyNominalSampleRate) {
-            AudioDevice.setNominalSampleRate(deviceID, rate)
+        if let rate = originalDeviceRate, AudioDevice.hasProperty(activeDeviceID, kAudioDevicePropertyNominalSampleRate) {
+            AudioDevice.setNominalSampleRate(activeDeviceID, rate)
             NCLog.log(String(format: "[播放] 已恢复设备原采样率 %.0f", rate))
         }
         originalDeviceRate = nil
     }
 
-    private var pendingSeekSeconds: Double?
-    private var seeking = false
-
-    /// 拖动进度(seek 由解码线程执行, 保证与 IOProc 不冲突)。
+    /// 暂停 IO 后串行 seek，避免清空环形缓冲时与实时回调同时读写。
     public func seek(to seconds: Double) {
-        guard case .playing = state else { return }
-        pendingSeekSeconds = seconds
+        guard seconds.isFinite, state == .playing || state == .paused, let extFile, let ring else { return }
+        let target = min(max(seconds, 0), max(trackStatus.seconds - 0.001, 0))
+        let runningProc = state == .playing ? ioProcID : nil
+        if let runningProc { AudioDeviceStop(activeDeviceID, runningProc) }
+        decodeLock.lock()
+        let result = ExtAudioFileSeek(extFile, Int64(target * Double(trackStatus.fileRate)))
+        if result == noErr {
+            ring.reset()
+            reachedEOF = false
+            finishNotified = false
+            framesPlayed.store(Int64(target * Double(trackStatus.deviceRate)), ordering: .relaxed)
+            startFadeIn()
+        }
+        decodeLock.unlock()
+        if let runningProc, AudioDeviceStart(activeDeviceID, runningProc) != noErr {
+            stopPlayback()
+            state = .error("跳转后无法恢复音频输出")
+        }
     }
 
     public var durationSeconds: Double { trackStatus.seconds }
@@ -320,8 +333,12 @@ public final class ExclusivePlayer {
                          fileRate, fileBits, Int(fileFormat.mChannelsPerFrame)))
 
         // 2. 独占设备 + 把设备采样率切到与音源一致
-        let hogged = AudioDevice.takeHog(deviceID)
+        let hogged = AudioDevice.takeHog(activeDeviceID)
         trackStatus.exclusive = hogged
+        guard hogged else {
+            throw NSError(domain: "ExclusivePlayer", code: -6,
+                          userInfo: [NSLocalizedDescriptionKey: "输出设备被其他程序占用，请稍后重试"])
+        }
 
         var targetRate = Double(fileRate)
         if !rememberAndSetRate(targetRate) {
@@ -336,74 +353,62 @@ public final class ExclusivePlayer {
                 }
             }
             if !ok {
-                targetRate = AudioDevice.nominalSampleRate(deviceID)
+                targetRate = AudioDevice.nominalSampleRate(activeDeviceID)
             }
             trackStatus.resampled = Int(targetRate) != fileRate
         } else {
             trackStatus.resampled = false
         }
-        trackStatus.deviceRate = Int(AudioDevice.nominalSampleRate(deviceID))
+        trackStatus.deviceRate = Int(AudioDevice.nominalSampleRate(activeDeviceID))
 
-        // 3. 设备物理格式作为 client 格式(int→float 或 int 直通, 均无损)
-        guard var physical = AudioDevice.physicalFormat(deviceID) else {
-            NCLog.log("[播放] ✗ 无法读取设备物理格式")
+        // 3. IOProc 必须使用虚拟格式。物理格式可能是 Int16，回调实际仍是 Float32。
+        guard let virtual = AudioDevice.virtualFormat(activeDeviceID) else {
             throw NSError(domain: "ExclusivePlayer", code: -2,
-                          userInfo: [NSLocalizedDescriptionKey: "无法读取设备物理格式"])
+                          userInfo: [NSLocalizedDescriptionKey: "无法读取设备回调格式"])
         }
-        physical.mSampleRate = targetRate
-        clientFormat = physical
-        NCLog.log(String(format: "[播放] 设备物理格式: %d Hz / %d bit / %d ch / flags=0x%X interleaved=%@ bytesPerFrame=%d",
-                         Int(physical.mSampleRate), Int(physical.mBitsPerChannel),
-                         Int(physical.mChannelsPerFrame), physical.mFormatFlags,
-                         (physical.mFormatFlags & kAudioFormatFlagIsNonInterleaved) == 0 ? "是" : "否",
-                         Int(physical.mBytesPerFrame)))
-        volumeApplies = (physical.mFormatFlags & kAudioFormatFlagIsFloat) != 0
-        if !volumeApplies {
-            NCLog.log("[播放] 设备为整型物理格式, 软件音量禁用(防止整数位被浮点乘出噪音)")
+        let output = try FloatPCMOutput(virtualFormat: virtual)
+        outputPCM = output
+        clientFormat = output.decoderFormat
+        guard abs(clientFormat.mSampleRate - targetRate) < 1 else {
+            throw NSError(domain: "ExclusivePlayer", code: -7,
+                          userInfo: [NSLocalizedDescriptionKey: "输出设备采样率尚未切换完成"])
         }
-        NCLog.log(String(format: "[播放] 独占=%@ 音源→设备采样率 %d → %d", hogged ? "成功" : "失败", fileRate, Int(targetRate)))
+        NCLog.log("[播放] IO 虚拟格式: \(Int(virtual.mSampleRate)) Hz / \(virtual.mBitsPerChannel) bit float / \(output.channels) ch / bytesPerFrame=\(virtual.mBytesPerFrame)")
+        if let physical = AudioDevice.physicalFormat(activeDeviceID) {
+            NCLog.log("[播放] 设备物理格式（仅诊断）: \(Int(physical.mSampleRate)) Hz / \(physical.mBitsPerChannel) bit / bytesPerFrame=\(physical.mBytesPerFrame)")
+        }
+        var decoder = clientFormat
         status = ExtAudioFileSetProperty(extFileRef, kExtAudioFileProperty_ClientDataFormat,
-                                         size, &physical)
+                                         size, &decoder)
         guard status == noErr else {
             throw NSError(domain: "ExclusivePlayer", code: Int(status),
-                          userInfo: [NSLocalizedDescriptionKey: "无法设置解码输出格式"])
+                          userInfo: [NSLocalizedDescriptionKey: "无法设置 Float32 解码输出格式"])
         }
 
-        // 4. 环形缓冲 + 解码线程
-        let channels = Int(physical.mChannelsPerFrame)
-        ring = RingBuffer(frames: 1 << 17, channels: channels)   // ~1.5s @ 44.1k
+        // 4. 始终以交错 Float32 解码和缓冲；IO 阶段按虚拟格式分配声道。
+        let channels = output.channels
+        ring = RingBuffer(frames: 1 << 17, channels: channels)
+        renderScratch = .allocate(capacity: renderCapacityFrames * channels)
+        if ioDumpEnabled { ioDumpStorage = [Float32](repeating: 0, count: ioDumpMaxFrames * channels) }
         ring?.reset()
-        framesPlayed = 0
-        stopDecode = false
+        framesPlayed.store(0, ordering: .relaxed)
+        stopDecode.store(false, ordering: .releasing)
 
-        let thread = Thread { [weak self] in self?.decodeLoop() }
+        reachedEOF = false
+        finishNotified = false
+        let currentGeneration = generation
+        let finished = DispatchGroup()
+        finished.enter()
+        decodeFinished = finished
+        let thread = Thread { [weak self] in
+            defer { finished.leave() }
+            self?.decodeLoop(generation: currentGeneration)
+        }
         thread.name = "PureListen.decoder"
         thread.qualityOfService = .userInitiated
-        thread.start()
         decodeThread = thread
-
-        // 5. IOProc
-        var ioProc: AudioDeviceIOProcID?
-        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
-        let createStatus = AudioDeviceCreateIOProcID(deviceID, { device, now, inputData, inputTime,
-                                                                 outputData, outputTime, client in
-            let player = Unmanaged<ExclusivePlayer>.fromOpaque(client!).takeUnretainedValue()
-            return player.ioCallback(outputData)
-        }, selfPtr, &ioProc)
-        guard createStatus == noErr, let proc = ioProc else {
-            stopDecode = true
-            throw NSError(domain: "ExclusivePlayer", code: Int(createStatus),
-                          userInfo: [NSLocalizedDescriptionKey: "无法创建音频输出回调"])
-        }
-        ioProcID = proc
-        guard AudioDeviceStart(deviceID, proc) == noErr else {
-            AudioDeviceDestroyIOProcID(deviceID, proc)
-            ioProcID = nil
-            stopDecode = true
-            throw NSError(domain: "ExclusivePlayer", code: -3,
-                          userInfo: [NSLocalizedDescriptionKey: "无法启动音频设备(可能被其他 App 独占)"])
-        }
-        hogOtherOutputs()   // 同时接管其余输出设备(修复: 此前漏插在主播放路径)
+        thread.start()
+        try startIO()
         onTrackChange?(trackStatus)
     }
 
@@ -439,173 +444,114 @@ public final class ExclusivePlayer {
 
     // MARK: - 解码线程
 
-    private func decodeLoop() {
+    private func decodeLoop(generation currentGeneration: UUID) {
         guard let extFile, let ring else { return }
         let chunkFrames = 8192
         let bytesPerFrame = Int(clientFormat.mBytesPerFrame)
         var bufferList = AudioBufferList()
         bufferList.mNumberBuffers = 1
         bufferList.mBuffers.mNumberChannels = clientFormat.mChannelsPerFrame
-        bufferList.mBuffers.mDataByteSize = UInt32(chunkFrames * bytesPerFrame)
         let heap = UnsafeMutableRawPointer.allocate(byteCount: chunkFrames * bytesPerFrame, alignment: 16)
         bufferList.mBuffers.mData = heap
         defer { heap.deallocate() }
+        var lastPosition = -1.0
 
-        var eof = false
-        while !stopDecode {
-            if let target = pendingSeekSeconds, !seeking {
-                seeking = true
-                let frame = Int64(target * Double(trackStatus.fileRate))
-                if ExtAudioFileSeek(extFile, frame) == noErr {
-                    ring.reset()
-                    framesPlayed = Int64(target * Double(trackStatus.deviceRate))
-                    eof = false
-                    startFadeIn()   // seek 后同样淡入防爆音
-                }
-                pendingSeekSeconds = nil
-                seeking = false
-            }
-            if ring.availableToWrite >= chunkFrames {
-                if eof {
-                    // 播完: 等缓冲排空再通知
-                    if ring.availableToRead == 0 {
-                        DispatchQueue.main.async { [weak self] in
-                            self?.onTrackFinished?()
-                        }
-                        return
-                    }
-                    usleep(20_000)
-                    continue
-                }
+        while !stopDecode.load(ordering: .acquiring) {
+            decodeLock.lock()
+            var shouldFinish = false
+            if !reachedEOF && ring.availableToWrite >= chunkFrames {
                 var frames = UInt32(chunkFrames)
-                let status = ExtAudioFileRead(extFile, &frames, &bufferList)
-                if status != noErr || frames == 0 {
-                    eof = true
-                    continue
+                bufferList.mBuffers.mDataByteSize = UInt32(chunkFrames * bytesPerFrame)
+                let result = ExtAudioFileRead(extFile, &frames, &bufferList)
+                if result != noErr || frames == 0 {
+                    reachedEOF = true
+                    if result != noErr { NCLog.log("[播放] 解码读取失败: OSStatus=\(result)") }
+                } else {
+                    let source = heap.assumingMemoryBound(to: Float32.self)
+                    if ioDumpEnabled && decodeDumpCount < ioDumpMaxFrames {
+                        let count = min(Int(frames), ioDumpMaxFrames - decodeDumpCount)
+                        decodeDump.append(contentsOf: UnsafeBufferPointer(start: source, count: count * Int(clientFormat.mChannelsPerFrame)))
+                        decodeDumpCount += count
+                    }
+                    _ = ring.write(source, frames: Int(frames))
                 }
-                let src = bufferList.mBuffers.mData!.assumingMemoryBound(to: Float32.self)
-                if ioDumpEnabled, decodeDumpCount < ioDumpMaxFrames {
-                    decodeDump.append(contentsOf: UnsafeBufferPointer(start: src, count: Int(frames) * Int(clientFormat.mChannelsPerFrame)))
-                    decodeDumpCount += Int(frames)
-                }
-                _ = ring.write(src, frames: Int(frames))
-                // 单声道文件 mBytesPerFrame 情况: client 格式与设备一致, 通道匹配。
+            }
+            if reachedEOF && ring.availableToRead == 0 && !finishNotified {
+                finishNotified = true
+                shouldFinish = true
+            }
+            decodeLock.unlock()
+
+            if shouldFinish {
                 DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    self.trackStatus.positionSeconds = Double(self.framesPlayed) /
-                        max(Double(self.trackStatus.deviceRate), 1)
+                    guard let self, self.generation == currentGeneration, self.state == .playing else { return }
+                    self.decodeLock.lock()
+                    let stillFinished = self.reachedEOF
+                    self.decodeLock.unlock()
+                    if stillFinished { self.onTrackFinished?() }
+                }
+            }
+            let position = Double(framesPlayed.load(ordering: .relaxed)) / max(Double(trackStatus.deviceRate), 1)
+            if abs(position - lastPosition) >= 0.05 {
+                lastPosition = position
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.generation == currentGeneration else { return }
+                    self.trackStatus.positionSeconds = position
                     self.onTrackChange?(self.trackStatus)
                 }
-            } else {
-                usleep(15_000)
             }
+            usleep(5_000)
         }
-    }
-
-    private func p0Samples(_ p: UnsafePointer<Float32>, frames: Int, channels: Int) -> [Float32] {
-        Array(UnsafeBufferPointer(start: p, count: frames * channels))
     }
 
     // MARK: - 实时回调
 
-    private var loggedIOStructure = false
-
     private func ioCallback(_ outputData: UnsafePointer<AudioBufferList>?) -> OSStatus {
-        guard let outputData else { return noErr }
-        guard let ring else { return noErr }
-        let list = UnsafeMutablePointer(mutating: outputData)
-        let bufferCount = Int(list.pointee.mNumberBuffers)
-        let channels = Int(clientFormat.mChannelsPerFrame)
-
-        if !loggedIOStructure {
-            loggedIOStructure = true
-            var desc = "IOProc 缓冲列表: \(bufferCount) 个缓冲"
-            for i in 0..<min(bufferCount, 4) {
-                let b = list[i].mBuffers
-                desc += " [\(i)] ch=\(b.mNumberChannels) bytes=\(b.mDataByteSize)"
-            }
-            NCLog.log("[播放] " + desc)
-        }
-
-        if bufferCount == 1, let data = list[0].mBuffers.mData {
-            // 交错: 直接整块搬运
-            let frames = Int(list[0].mBuffers.mDataByteSize) / max(Int(clientFormat.mBytesPerFrame), 1)
-            let p = data.assumingMemoryBound(to: Float32.self)
-            let got = ring.read(into: p, frames: frames)
-            framesPlayed += Int64(got)
-            framesSinceFadeStart += Int64(frames)
-            if ioDumpEnabled, ioDumpCount < ioDumpMaxFrames {
-                ioDump.append(contentsOf: UnsafeBufferPointer(start: p, count: frames * channels))
-                ioDumpCount += frames
-            }
-            // 安全输出: 淡入 × 音量 × 非法值钳制(杜绝任何形式的爆音)
-            let gain = (volumeApplies ? volume : 1) * safeGain()
-            sanitizeOutput(p, count: frames * channels, gain: gain)
-        } else if bufferCount >= 2, channels == 2 {
-            // 非交错(每通道一个缓冲): 从交错的 ring 拆声道
-            let first = list[0].mBuffers
-            let frames = Int(first.mDataByteSize) / MemoryLayout<Float32>.size
-            guard let left = first.mData?.assumingMemoryBound(to: Float32.self),
-                  let right = list[1].mBuffers.mData?.assumingMemoryBound(to: Float32.self) else {
-                return noErr
-            }
-            scratchDeinterleave(with: frames)
-            let got = ring.read(into: deinterleaveScratch, frames: frames)
-            framesPlayed += Int64(got)
-            framesSinceFadeStart += Int64(frames)
-            sanitizeOutput(deinterleaveScratch, count: frames * 2,
-                           gain: (volumeApplies ? volume : 1) * safeGain())
-            for f in 0..<frames {
-                left[f] = deinterleaveScratch[f * 2]
-                right[f] = deinterleaveScratch[f * 2 + 1]
-            }
-            if ioDumpEnabled, ioDumpCount < ioDumpMaxFrames {
-                ioDump.append(contentsOf: UnsafeBufferPointer(start: deinterleaveScratch, count: frames * channels))
-                ioDumpCount += frames
+        guard let outputData, let ring, let outputPCM, let renderScratch else { return noErr }
+        let scratch = UnsafeMutableBufferPointer(start: renderScratch, count: renderCapacityFrames * outputPCM.channels)
+        let result = outputPCM.render(ring: ring, output: UnsafeMutablePointer(mutating: outputData),
+                                      scratch: scratch, gain: volume * safeGain())
+        framesPlayed.wrappingAdd(Int64(result.frames), ordering: .relaxed)
+        framesSinceFadeStart += Int64(result.frames)
+        clampedSampleCount += result.clamped
+        if ioDumpEnabled {
+            let count = min(result.frames * outputPCM.channels, ioDumpStorage.count - ioDumpCount)
+            if count > 0 {
+                for index in 0..<count { ioDumpStorage[ioDumpCount + index] = renderScratch[index] }
+                ioDumpCount += count
             }
         }
         return noErr
     }
 
-    private var deinterleaveScratch: UnsafeMutablePointer<Float32> = .allocate(capacity: 8192 * 2)
-    private func scratchDeinterleave(with frames: Int) {
-        if frames > 8192 {
-            deinterleaveScratch.deallocate()
-            deinterleaveScratch = .allocate(capacity: frames * 2)
-        }
-    }
-
     // MARK: - 停止
 
     private func stopPlayback() {
-        if clampedSampleCount > 0 {
-            NCLog.log("[播放] ⚠ 本次播放钳制了 \(clampedSampleCount) 个异常采样(数据异常已被安全拦截)")
-        }
-        stopDecode = true
-        // 等解码线程退出后再释放资源, 避免 ExtAudioFileRead 访问已释放句柄(use-after-free)
-        if let thread = decodeThread {
-            let deadline = Date().addingTimeInterval(2.0)
-            while thread.isExecuting && Date() < deadline {
-                usleep(2000)
-            }
-            decodeThread = nil
-        }
+        generation = UUID()
+        stopDecode.store(true, ordering: .releasing)
         if let ioProcID {
-            AudioDeviceStop(deviceID, ioProcID)
-            AudioDeviceDestroyIOProcID(deviceID, ioProcID)
+            AudioDeviceStop(activeDeviceID, ioProcID)
+            AudioDeviceDestroyIOProcID(activeDeviceID, ioProcID)
             self.ioProcID = nil
         }
-        if let extFile {
-            ExtAudioFileDispose(extFile)
-            self.extFile = nil
+        // 解码线程退出后才释放文件和环形缓冲，不在超时后释放仍被使用的内存。
+        decodeFinished?.wait()
+        decodeFinished = nil
+        decodeThread = nil
+        if clampedSampleCount > 0 {
+            NCLog.log("[播放] ⚠ 本次播放钳制了 \(clampedSampleCount) 个异常采样")
         }
-        releaseOtherOutputs()
+        if let extFile { ExtAudioFileDispose(extFile); self.extFile = nil }
+        renderScratch?.deallocate()
+        renderScratch = nil
+        outputPCM = nil
         ring = nil
-        if deviceID != 0 {
-            AudioDevice.releaseHog(deviceID)
-            restoreOriginalRate()
-        }
-        framesPlayed = 0
+        restoreOriginalRate()
+        if activeDeviceExists { AudioDevice.releaseHog(activeDeviceID) }
+        releaseOtherOutputs()
+        activeDeviceID = 0
+        activeDeviceUID = nil
+        framesPlayed.store(0, ordering: .relaxed)
         trackStatus.positionSeconds = 0
     }
 }

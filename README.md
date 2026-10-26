@@ -134,6 +134,8 @@ BIN="$(swift build -c debug --show-bin-path)"
 "$BIN/apitest" hct                               # B站公开 API 连通性，不登录
 "$BIN/apitest" qr                                # 扫码登录链路
 "$BIN/apitest" url <歌曲id>                        # eapi 取直链
+"$BIN/hogtest" devices                           # 只读设备的虚拟/物理格式
+"$BIN/hogtest" verify-silent --generated <设备ID>  # 零音量硬件验证；暂停/跳转/重启/恢复
 "$BIN/hogtest"                                   # 独占链路测试；会出声并临时接管设备
 ```
 

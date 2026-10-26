@@ -49,6 +49,74 @@ func writeWav(path: String, sampleRate: Int, seconds: Double, freq: Double, amp:
 }
 
 let arguments = CommandLine.arguments
+if arguments.count > 1, arguments[1] == "devices" {
+    for device in AudioDevice.allDevices() {
+        print("device=\(device.id) name=\(device.name) rate=\(device.currentRate)")
+        if let v = AudioDevice.virtualFormat(device.id), let p = AudioDevice.physicalFormat(device.id) {
+            print("  virtual: \(v.mBitsPerChannel)bit flags=\(v.mFormatFlags) bytesPerFrame=\(v.mBytesPerFrame); physical: \(p.mBitsPerChannel)bit flags=\(p.mFormatFlags) bytesPerFrame=\(p.mBytesPerFrame)")
+        }
+    }
+    exit(0)
+}
+if arguments.count > 3, arguments[1] == "verify-silent" {
+    guard let id = UInt32(arguments[3]), let device = AudioDevice.allDevices().first(where: { $0.id == id }) else {
+        print("未找到指定设备"); exit(1)
+    }
+    let generated = arguments[2] == "--generated"
+    let path = generated ? NSTemporaryDirectory() + "PureListen-\(UUID().uuidString).wav" : arguments[2]
+    if generated { writeWav(path: path, sampleRate: 48000, seconds: 2, freq: 440, amp: 0.08) }
+    defer { if generated { try? FileManager.default.removeItem(atPath: path) } }
+    let originalRate = AudioDevice.nominalSampleRate(id)
+    let player = ExclusivePlayer()
+    player.deviceID = id
+    player.volume = 0
+    player.blockOtherOutputs = false
+    player.ioDumpEnabled = true
+    var finished = false
+    player.onTrackFinished = { finished = true }
+    player.onStateChange = { print("state=\($0)") }
+    func pump(_ seconds: Double) {
+        let until = Date().addingTimeInterval(seconds)
+        while Date() < until { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+    }
+    var metadata = ExclusivePlayer.TrackStatus()
+    metadata.title = "静音链路验证"
+    metadata.format = URL(fileURLWithPath: path).pathExtension
+    print("设备: \(device.name)，音量=0，不接管其他输出设备")
+    player.playFile(url: URL(fileURLWithPath: path), metadata: metadata)
+    var ok = player.state == .playing && AudioDevice.hogOwner(id) == getpid()
+    pump(0.25)
+    player.pause()
+    ok = ok && player.state == .paused && AudioDevice.nominalSampleRate(id) == originalRate
+    player.resume()
+    ok = ok && player.state == .playing
+    player.seek(to: 0.1)
+    pump(0.2)
+    // 连续重启覆盖旧 IO、文件释放和仍在启动的解码线程。
+    player.playFile(url: URL(fileURLWithPath: path), metadata: metadata)
+    player.playFile(url: URL(fileURLWithPath: path), metadata: metadata)
+    pump(0.25)
+    ok = ok && player.state == .playing
+    let duration = player.durationSeconds
+    finished = false
+    player.seek(to: max(0, duration - 0.15))
+    pump(0.5)
+    ok = ok && finished
+    let clamped = player.clampedSampleCount
+    player.shutdown()
+    let decoded = player.decodeDump
+    let output = player.ioDump
+    let decodeValid = !decoded.isEmpty && decoded.allSatisfy { $0.isFinite && abs($0) <= 1 }
+    let decodeNonzero = decoded.contains { abs($0) > 0.000001 }
+    let outputSilent = !output.isEmpty && output.allSatisfy { $0 == 0 }
+    let restored = AudioDevice.nominalSampleRate(id) == originalRate && AudioDevice.hogOwner(id) != getpid()
+    print("decodedSamples=\(decoded.count) finiteInRange=\(decodeValid) nonzero=\(decodeNonzero)")
+    print("outputSamples=\(output.count) allZero=\(outputSilent) clamped=\(clamped)")
+    print("finished=\(finished) rateRestored=\(restored)")
+    let passed = ok && decodeValid && decodeNonzero && outputSilent && clamped == 0 && restored
+    print(passed ? "PASS: 静音硬件链路验证通过" : "FAIL: 静音硬件链路验证失败")
+    exit(passed ? 0 : 1)
+}
 if arguments.count > 1, arguments[1] == "voltest" {
     // hog 独占下, 系统音量属性是否仍可变(coreaudiod 是否被 hog 挡住)
     guard let device = AudioDevice.preferredOutput() else { print("无设备"); exit(1) }
