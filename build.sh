@@ -11,6 +11,18 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 SIGN_IDENTITY="${PURELISTEN_SIGN_IDENTITY:-PureListen Dev}"
+VERSION="$(cat VERSION)"
+BUILD_NUMBER="$(cat BUILD_NUMBER)"
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "VERSION 格式无效" >&2; exit 1; }
+[[ "$BUILD_NUMBER" =~ ^[0-9]+$ ]] || { echo "BUILD_NUMBER 格式无效" >&2; exit 1; }
+read -r -a ARCHS <<< "${PURELISTEN_ARCHS:-arm64 x86_64}"
+BUILD_ARGS=(-c release)
+for arch in "${ARCHS[@]}"; do
+    case "$arch" in
+        arm64|x86_64) BUILD_ARGS+=(--arch "$arch") ;;
+        *) echo "不支持的架构: $arch" >&2; exit 1 ;;
+    esac
+done
 
 sign_app() {
     local app="$1"
@@ -24,10 +36,17 @@ sign_app() {
     fi
 }
 
-echo "==> Release 构建"
-swift build -c release --product PureListen
+echo "==> Release 构建 $VERSION ($BUILD_NUMBER): ${ARCHS[*]}"
+swift build "${BUILD_ARGS[@]}" --product PureListen
 
-BIN="$(swift build -c release --show-bin-path)/PureListen"
+BIN="$(swift build "${BUILD_ARGS[@]}" --show-bin-path)/PureListen"
+BUILT_ARCHS="$(lipo -archs "$BIN")"
+for arch in "${ARCHS[@]}"; do
+    case " $BUILT_ARCHS " in
+        *" $arch "*) ;;
+        *) echo "构建产物缺少架构: $arch" >&2; exit 1 ;;
+    esac
+done
 mkdir -p dist
 PACKAGE_DIR="$(mktemp -d dist/.package.XXXXXX)"
 trap 'rm -rf "$PACKAGE_DIR"' EXIT
@@ -36,13 +55,14 @@ APP="$PACKAGE_DIR/净听.app"
 echo "==> 组装 $APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/PureListen"
+cp LICENSE "$APP/Contents/Resources/LICENSE.txt"
 
 # 应用图标(macOS 27 分层玻璃风格), 由 tools/make_icon.swift 生成
 if [ -f "Resources/AppIcon.icns" ]; then
     cp "Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 fi
 
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -54,9 +74,9 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleIdentifier</key>
     <string>com.purelisten.app</string>
     <key>CFBundleVersion</key>
-    <string>2</string>
+    <string>$BUILD_NUMBER</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.0.0</string>
+    <string>$VERSION</string>
     <key>CFBundleExecutable</key>
     <string>PureListen</string>
     <key>CFBundlePackageType</key>
