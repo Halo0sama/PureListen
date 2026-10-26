@@ -9,12 +9,14 @@ struct ContentView: View {
     /// 预览/截图用: 直接落在某个页面。
     var initialRoute: PopoverRoute = .home
     var initialTab: PopoverTab = .playlists
+    var initialNowPlayingPane: NowPlayingPane = .player
 
     var body: some View {
         Group {
             if state.isLoggedIn {
                 AlbumTintProvider(url: state.currentCoverURL) {
-                    PopoverShell(initialRoute: initialRoute, initialTab: initialTab)
+                    PopoverShell(initialRoute: initialRoute, initialTab: initialTab,
+                                 initialNowPlayingPane: initialNowPlayingPane)
                 }
             } else {
                 LoginView()
@@ -28,16 +30,20 @@ struct ContentView: View {
 // MARK: - 外壳
 
 /// 顶栏 + 内容 + 浮动播放台。
+///
+/// 「正在播放」页自己就是完整播放器, 所以那一页隐藏底部玻璃台, 避免两套控制重复。
 struct PopoverShell: View {
     @EnvironmentObject var state: AppState
     var initialRoute: PopoverRoute = .home
     var initialTab: PopoverTab = .playlists
+    var initialNowPlayingPane: NowPlayingPane = .player
     @StateObject private var router: PopoverRouter
-    @State private var showNowPlayingWindow = false
 
-    init(initialRoute: PopoverRoute = .home, initialTab: PopoverTab = .playlists) {
+    init(initialRoute: PopoverRoute = .home, initialTab: PopoverTab = .playlists,
+         initialNowPlayingPane: NowPlayingPane = .player) {
         self.initialRoute = initialRoute
         self.initialTab = initialTab
+        self.initialNowPlayingPane = initialNowPlayingPane
         _router = StateObject(wrappedValue: {
             let router = PopoverRouter()
             router.route = initialRoute
@@ -53,29 +59,34 @@ struct PopoverShell: View {
                 content
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            // 底部两角: 用画布色盖住 popover 圆角外侧的内容, 避免"列表被裁断"的错觉。
-            LinearGradient(stops: [
-                .init(color: DS.Palette.canvas.opacity(0), location: 0),
-                .init(color: DS.Palette.canvas.opacity(0.86), location: 0.55),
-                .init(color: DS.Palette.canvas, location: 1),
-            ], startPoint: .top, endPoint: .bottom)
-                .frame(height: 42)
-                .frame(maxHeight: .infinity, alignment: .bottom)
-                .allowsHitTesting(false)
 
-            VStack(spacing: 0) {
-                // 底部渐隐: 让列表在玻璃台下方自然淡出, 而不是从圆角外侧被裁断。
-                LinearGradient(colors: [DS.Palette.canvas.opacity(0), DS.Palette.canvas],
-                               startPoint: .top, endPoint: .bottom)
-                    .frame(height: 38)
+            if router.route != .nowPlaying {
+                // 底部两角: 用画布色盖住 popover 圆角外侧的内容。
+                LinearGradient(stops: [
+                    .init(color: DS.Palette.canvas.opacity(0), location: 0),
+                    .init(color: DS.Palette.canvas.opacity(0.86), location: 0.55),
+                    .init(color: DS.Palette.canvas, location: 1),
+                ], startPoint: .top, endPoint: .bottom)
+                    .frame(height: 42)
+                    .frame(maxHeight: .infinity, alignment: .bottom)
                     .allowsHitTesting(false)
-                PopoverTransport()
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 12)
+
+                VStack(spacing: 0) {
+                    // 底部渐隐: 让列表在玻璃台下方自然淡出。
+                    LinearGradient(colors: [DS.Palette.canvas.opacity(0), DS.Palette.canvas],
+                                   startPoint: .top, endPoint: .bottom)
+                        .frame(height: 38)
+                        .allowsHitTesting(false)
+                    PopoverTransport()
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 12)
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
         .environmentObject(router)
         .frame(width: DS.Size.popoverWidth, height: DS.Size.popoverHeight)
+        .animation(DS.Motion.page, value: router.route)
         .onAppear {
             // 打开面板时不要让输入框抢到焦点: 用户第一下应该是"看"而不是"输"。
             DispatchQueue.main.async {
@@ -93,6 +104,12 @@ struct PopoverShell: View {
         case .playlist:
             PopoverTrackList()
                 .transition(.opacity)
+        case .search:
+            PopoverSearchPage()
+                .transition(.opacity)
+        case .nowPlaying:
+            PopoverNowPlayingPage(initialPane: initialNowPlayingPane)
+                .transition(.opacity)
         case .settings:
             PopoverSettingsPage()
                 .transition(.opacity)
@@ -107,7 +124,7 @@ struct PopoverTopBar: View {
     @ObservedObject var router: PopoverRouter
 
     var body: some View {
-        HStack(spacing: DS.Space.s) {
+        HStack(spacing: 6) {
             if router.route != .home {
                 DSIconButton(systemName: "chevron.left", size: 26, iconSize: 11,
                              help: "返回") { router.back() }
@@ -129,27 +146,24 @@ struct PopoverTopBar: View {
             }
             .padding(.leading, router.route == .home ? 2 : 0)
 
-            Spacer(minLength: DS.Space.s)
+            Spacer(minLength: 4)
 
-            if router.route == .settings {
-                // 设置页没有其它动作: 右侧留空, 让页头只有一个返回。
-                EmptyView()
-            } else {
-                HStack(spacing: 0) {
-                    if router.route == .home {
-                        DSIconButton(systemName: "macwindow.on.rectangle", size: 26, iconSize: 11,
-                                     help: "打开播放窗口") {
-                            state.onOpenNowPlaying?()
-                        }
-                    }
-                    DSIconButton(systemName: "gearshape", size: 26, iconSize: 11, help: "设置") {
-                        router.openSettings()
-                    }
+            // 搜索: 单独拎出来的一枚玻璃圆钮, 就在「窗口模式」左边。
+            if router.route != .search {
+                DSGlassIconButton(systemName: "magnifyingglass", help: "搜索") {
+                    router.openSearch()
                 }
-                .padding(.horizontal, 3)
-                .padding(.vertical, 3)
-                .dsGlass(in: Capsule(style: .continuous), interactive: true,
-                         fallbackFill: DS.Palette.surface)
+            }
+
+            // 窗口模式: 保留原来的「打开独立播放窗口」功能。
+            DSGlassPillButton(title: "窗口模式", systemImage: "macwindow.on.rectangle") {
+                state.onOpenNowPlaying?()
+            }
+
+            if router.route != .settings {
+                DSGlassIconButton(systemName: "gearshape", help: "设置") {
+                    router.openSettings()
+                }
             }
         }
         .padding(.horizontal, DS.Space.popoverPadding)
@@ -160,6 +174,8 @@ struct PopoverTopBar: View {
         switch router.route {
         case .home: return "净听"
         case .playlist: return state.currentPlaylist?.name ?? "歌单"
+        case .search: return "搜索"
+        case .nowPlaying: return "正在播放"
         case .settings: return "设置"
         }
     }
@@ -172,6 +188,11 @@ struct PopoverTopBar: View {
         case .playlist:
             guard let playlist = state.currentPlaylist else { return nil }
             return "\(playlist.trackCount) 首 · 网易云歌单"
+        case .search:
+            return "搜索歌曲 · 粘贴链接直达"
+        case .nowPlaying:
+            let artist = state.trackStatus.artist
+            return artist.isEmpty ? state.currentSourceLabel : artist
         case .settings:
             return "外观与播放偏好"
         }

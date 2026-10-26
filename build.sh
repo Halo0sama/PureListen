@@ -1,7 +1,28 @@
 #!/bin/bash
-# 净听 PureListen 打包脚本: Release 构建 → 组装 .app → ad-hoc 签名
+# 净听 PureListen 打包脚本: Release 构建 → 组装 .app → 签名
+#
+# 签名:
+#   默认尝试用稳定身份 "PureListen Dev"（tools/setup-dev-signing.sh 生成的自签名证书）。
+#   用固定证书签名后，App 的 designated requirement 只跟 bundle id + 证书根哈希有关，
+#   重新构建不会让 macOS 把旧的「辅助功能」等 TCC 授权判为失效。
+#   找不到该身份时自动回退 ad-hoc（`-`），但那样每次重建都要重新授权。
+#   可用 PURELISTEN_SIGN_IDENTITY=... 覆盖身份名。
 set -euo pipefail
 cd "$(dirname "$0")"
+
+SIGN_IDENTITY="${PURELISTEN_SIGN_IDENTITY:-PureListen Dev}"
+
+sign_app() {
+    local app="$1"
+    if [ -n "$SIGN_IDENTITY" ] && codesign --force --sign "$SIGN_IDENTITY" \
+        --identifier com.purelisten.app "$app" >/dev/null 2>&1; then
+        echo "    已签名: $SIGN_IDENTITY"
+    else
+        codesign --force --sign - --identifier com.purelisten.app "$app"
+        echo "    ⚠ 未找到稳定签名身份 \"$SIGN_IDENTITY\"，已回退 ad-hoc。"
+        echo "      重建后系统授权（辅助功能）会失效；可运行 tools/setup-dev-signing.sh 创建稳定身份。"
+    fi
+}
 
 echo "==> Release 构建"
 swift build -c release --product PureListen
@@ -59,8 +80,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-echo "==> Ad-hoc 签名"
-codesign --force --sign - "$APP"
+echo "==> 签名"
+sign_app "$APP"
 
 # 自动同步: 用户已把 App 放进 /Applications 时, 保持它为最新版。
 # 只想检查构建产物、不想替换已安装版本时: PURELISTEN_NO_INSTALL=1 ./build.sh
@@ -68,7 +89,7 @@ if [ -d "/Applications/净听.app" ] && [ "${PURELISTEN_NO_INSTALL:-0}" != "1" ]
     echo "==> 同步最新版到 /Applications"
     rm -rf "/Applications/净听.app"
     cp -R "$APP" /Applications/
-    codesign --force --sign - "/Applications/净听.app" 2>/dev/null
+    sign_app "/Applications/净听.app"
 fi
 
 echo "==> 完成: $APP"

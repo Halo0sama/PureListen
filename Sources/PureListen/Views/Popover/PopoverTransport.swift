@@ -6,6 +6,7 @@ import PureListenCore
 /// 玻璃播放台: 浮在列表之上, 内容从它下方滚过 —— Golden Gate 的标志性层次。
 struct PopoverTransport: View {
     @EnvironmentObject var state: AppState
+    @EnvironmentObject var router: PopoverRouter
     @Environment(\.albumTint) private var tint
 
     @State private var scrubbing: Double?
@@ -53,27 +54,31 @@ struct PopoverTransport: View {
 
     private var trackRow: some View {
         HStack(spacing: DS.Space.m) {
+            // 点曲目区 → 在面板内打开「正在播放」页（不再弹新窗口）。
             Button {
-                state.onOpenNowPlaying?()
+                router.openNowPlaying()
             } label: {
-                CoverArtwork(url: state.currentCoverURL, size: 34,
-                             radius: DS.Radius.artSmall, shadow: true,
-                             borderOpacity: 0.16)
+                HStack(spacing: DS.Space.m) {
+                    CoverArtwork(url: state.currentCoverURL, size: 34,
+                                 radius: DS.Radius.artSmall, shadow: true,
+                                 borderOpacity: 0.16)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(hasTrack ? state.trackStatus.title : "未在播放")
+                            .font(.system(size: 12, weight: .semibold))
+                            .tracking(DS.Tracking.tight)
+                            .foregroundStyle(hasTrack ? DS.Palette.textPrimary
+                                                      : DS.Palette.textSecondary)
+                            .lineLimit(1)
+                        Text(detailLine)
+                            .font(DS.TypeScale.meta)
+                            .foregroundStyle(DS.Palette.textTertiary)
+                            .lineLimit(1)
+                    }
+                }
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help("打开播放窗口")
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text(hasTrack ? state.trackStatus.title : "未在播放")
-                    .font(.system(size: 12, weight: .semibold))
-                    .tracking(DS.Tracking.tight)
-                    .foregroundStyle(hasTrack ? DS.Palette.textPrimary : DS.Palette.textSecondary)
-                    .lineLimit(1)
-                Text(detailLine)
-                    .font(DS.TypeScale.meta)
-                    .foregroundStyle(DS.Palette.textTertiary)
-                    .lineLimit(1)
-            }
+            .help("展开正在播放")
 
             Spacer(minLength: DS.Space.xs)
 

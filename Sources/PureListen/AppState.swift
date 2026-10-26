@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SwiftUI
 import PureListenCore
@@ -150,19 +151,54 @@ final class AppState: ObservableObject {
 
     /// 静音策略: 播放(独占)中→系统静音; 暂停/停止→还原。
     private var permissionPromptShown = false
+    /// 初始化期间从 UserDefaults 恢复开关时，不要触发系统授权弹窗。
+    private var isRestoringState = true
+    /// 回到前台时重新检查辅助功能权限（用户可能刚在系统设置里授权）。
+    private var activationObserver: NSObjectProtocol?
 
+    /// 媒体键事件 tap 的启停。
+    ///
+    /// 注意：这里**不会**主动弹「辅助功能」授权窗。
+    /// 净听是 ad-hoc 签名，每次重新构建后系统里旧的辅助功能授权会失配；如果启动就弹窗，
+    /// 用户会看到"开关明明是开的却反复弹授权"的骚扰。因此改成只在用户主动打开
+    /// 「接管媒体键」开关时请求一次授权，其余时候只在设置页给一条可点击的提示。
     private func updateMediaKeyTap() {
         let need = playbackActive || mediaControlKeysEnabled
         let permitted = MediaKeyTap.hasPermission()
         mediaKeyTap.isEnabled = need && permitted
-        if need && !permitted {
-            if !permissionPromptShown {
-                permissionPromptShown = true
-                NCLog.log("[媒体键] ⚠ 无辅助功能权限, 本次启动仅提示一次")
-                MediaKeyTap.requestPermission()
-            }
-            NCLog.log("[媒体键] ⚠ 无辅助功能权限, 音量键拦截未生效; 若设置里已开启但仍弹窗, 请关闭再打开一次开关(重新构建后签名变化会导致授权失效)")
+        if need && !permitted && !permissionPromptShown {
+            permissionPromptShown = true
+            NCLog.log("[媒体键] 未获得辅助功能权限, 媒体键接管暂不可用; 可在 设置 → 播放保护 中重新授权")
         }
+        // 用户可能正在系统设置里授权：轻量轮询（只查询、不弹窗），授权后立刻启用接管。
+        if mediaControlKeysEnabled && !permitted {
+            startPermissionPolling()
+        } else {
+            stopPermissionPolling()
+        }
+    }
+
+    private var permissionPollTimer: Timer?
+
+    private func startPermissionPolling() {
+        guard permissionPollTimer == nil else { return }
+        permissionPollTimer = Timer.scheduledTimer(withTimeInterval: 4, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                if MediaKeyTap.hasPermission() {
+                    self.stopPermissionPolling()
+                    self.updateMediaKeyTap()
+                }
+            }
+        }
+        if let permissionPollTimer {
+            RunLoop.main.add(permissionPollTimer, forMode: .common)
+        }
+    }
+
+    private func stopPermissionPolling() {
+        permissionPollTimer?.invalidate()
+        permissionPollTimer = nil
     }
 
     private func applyMutePolicy() {
@@ -186,6 +222,11 @@ final class AppState: ObservableObject {
     @Published var mediaControlKeysEnabled = false {
         didSet {
             defaults.set(mediaControlKeysEnabled, forKey: "mediaControlKeys")
+            // 只有用户主动打开这个开关时才请求辅助功能授权（系统弹窗由用户操作触发）；
+            // 从偏好恢复的状态不请求，避免每次启动都弹窗。
+            if !isRestoringState, mediaControlKeysEnabled, !MediaKeyTap.hasPermission() {
+                MediaKeyTap.requestPermission()
+            }
             updateMediaKeyTap()
         }
     }
@@ -361,6 +402,21 @@ final class AppState: ObservableObject {
             Task { @MainActor in self?.playNext(autoPlay: true) }
         }
         if !previewMode { refreshDevices() }
+        isRestoringState = false
+
+        // 用户去系统设置授权后回到净听时，重新检查权限并启用媒体键接管。
+        activationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.updateMediaKeyTap() }
+            }
+    }
+
+    deinit {
+        if let activationObserver {
+            NotificationCenter.default.removeObserver(activationObserver)
+        }
+        permissionPollTimer?.invalidate()
     }
 
     // MARK: - 设备

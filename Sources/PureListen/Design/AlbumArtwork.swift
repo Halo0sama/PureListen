@@ -69,6 +69,10 @@ struct CoverArtwork: View {
     var borderOpacity: Double = 0.10
 
     @State private var image: NSImage?
+    /// 当前已加载的 (url, size)，用于在 URL 变化时丢弃旧图，避免串封面。
+    @State private var loadedKey: String = ""
+
+    private var loadKey: String { "\(url)|\(Int(size))" }
 
     var body: some View {
         let corner = radius ?? max(DS.Radius.artSmall, size * 0.14)
@@ -95,10 +99,23 @@ struct CoverArtwork: View {
         .shadow(color: shadow ? .black.opacity(0.35) : .clear,
                 radius: shadow ? max(8, size * 0.08) : 0,
                 y: shadow ? max(4, size * 0.045) : 0)
-        .task(id: url + "|" + String(Int(size))) {
-            if image == nil {
-                image = await ArtworkCache.shared.image(for: url, size: Int(size * 2))
+        .task(id: loadKey) {
+            let key = loadKey
+            guard loadedKey != key else { return }
+            loadedKey = key
+
+            let pixelSize = Int(size * 2)
+            // 命中缓存时直接切换，避免闪一下占位符。
+            if let cached = ArtworkCache.shared.cached(for: url, size: pixelSize) {
+                image = cached
+                return
             }
+            // 旧图立即清掉：宁可短暂显示占位符，也不能显示上一个歌单/上一首歌的封面。
+            image = nil
+            guard !url.isEmpty else { return }
+            let loaded = await ArtworkCache.shared.image(for: url, size: pixelSize)
+            guard !Task.isCancelled, loadedKey == key else { return }
+            image = loaded
         }
     }
 }

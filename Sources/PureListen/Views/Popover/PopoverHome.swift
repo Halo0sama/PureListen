@@ -7,23 +7,42 @@ struct PopoverHome: View {
     @EnvironmentObject var state: AppState
     @EnvironmentObject var router: PopoverRouter
 
+    /// 已经创建过的页面。页面创建一次后保留，切换分段只做显示/隐藏，
+    /// 避免每次点击 B 站都重新构建整页（会卡一下）。
+    @State private var loadedTabs: Set<PopoverTab> = [.playlists]
+
     var body: some View {
         VStack(spacing: DS.Space.m) {
             DSSegmented(items: PopoverTab.allCases, title: { $0.title },
-                        selection: $router.tab)
+                        selection: $router.tab,
+                        onHover: { item in
+                            // 悬停到 B 站时提前把页面构建好，点击时就不会有首帧卡顿。
+                            if let item { loadedTabs.insert(item) }
+                        })
                 .padding(.horizontal, DS.Space.popoverPadding)
 
-            Group {
-                switch router.tab {
-                case .playlists:
-                    PlaylistPane()
-                case .search:
-                    SearchPane()
-                case .bilibili:
+            ZStack {
+                PlaylistPane()
+                    .opacity(router.tab == .playlists ? 1 : 0)
+                    .allowsHitTesting(router.tab == .playlists)
+                    .accessibilityHidden(router.tab != .playlists)
+
+                if loadedTabs.contains(.bilibili) {
                     BiliPane()
+                        .opacity(router.tab == .bilibili ? 1 : 0)
+                        .allowsHitTesting(router.tab == .bilibili)
+                        .accessibilityHidden(router.tab != .bilibili)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .onChange(of: router.tab) { _, tab in
+                // 兜底：没有经过 hover 的切换路径也能保证页面已创建。
+                loadedTabs.insert(tab)
+            }
+            .onAppear {
+                // 预览/深链可能直接以 B 站作为初始分段。
+                loadedTabs.insert(router.tab)
+            }
         }
         .padding(.top, DS.Space.xs)
     }
@@ -34,12 +53,9 @@ struct PopoverHome: View {
 private struct PlaylistPane: View {
     @EnvironmentObject var state: AppState
     @EnvironmentObject var router: PopoverRouter
-    @State private var quickInput = ""
 
     var body: some View {
         VStack(spacing: DS.Space.m) {
-            QuickPlayField()
-
             ScrollView(.vertical) {
                 LazyVStack(spacing: 2) {
                     if state.playlists.isEmpty {
@@ -71,132 +87,6 @@ private struct PlaylistPane: View {
             .scrollEdgeEffectStyle(.soft, for: .top)
         }
         .padding(.horizontal, DS.Space.popoverPadding - DS.Space.s)
-    }
-}
-
-/// 快捷播放: 粘贴网易云 / B站 / 直链。
-private struct QuickPlayField: View {
-    @EnvironmentObject var state: AppState
-    @Environment(\.albumTint) private var tint
-    @State private var input = ""
-    @FocusState private var focused: Bool
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: DS.Space.s) {
-                Image(systemName: "link")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(focused ? tint : DS.Palette.textTertiary)
-                TextField("粘贴网易云 / B站 / 音频直链", text: $input)
-                    .textFieldStyle(.plain)
-                    .font(DS.TypeScale.body)
-                    .focused($focused)
-                    .focusEffectDisabled()
-                    .onSubmit(submit)
-                if state.quickPlayBusy {
-                    ProgressView().controlSize(.small).scaleEffect(0.65)
-                } else if !input.isEmpty {
-                    Button(action: submit) {
-                        Image(systemName: "arrow.right")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(.white)
-                            .frame(width: 19, height: 19)
-                            .background(Circle().fill(tint))
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.horizontal, 10)
-            .frame(height: 30)
-            .background {
-                RoundedRectangle(cornerRadius: DS.Radius.control + 2, style: .continuous)
-                    .fill(DS.Palette.surfaceHover.opacity(0.7))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: DS.Radius.control + 2, style: .continuous)
-                            .strokeBorder(focused ? tint.opacity(0.55) : DS.Palette.hairline,
-                                          lineWidth: focused ? 1.2 : 1)
-                    }
-            }
-            .animation(DS.Motion.quick, value: focused)
-
-            if let error = state.quickPlayError {
-                Text(error)
-                    .font(DS.TypeScale.caption)
-                    .foregroundStyle(DS.Palette.rose)
-                    .lineLimit(2)
-                    .padding(.horizontal, 4)
-            }
-        }
-        .padding(.horizontal, DS.Space.l)
-    }
-
-    private func submit() {
-        let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty else { return }
-        state.resolveAndPlay(value)
-        input = ""
-    }
-}
-
-// MARK: - 搜索
-
-private struct SearchPane: View {
-    @EnvironmentObject var state: AppState
-
-    var body: some View {
-        VStack(spacing: DS.Space.m) {
-            DSSearchField(placeholder: "搜索歌曲 / 歌手", text: $state.searchKeyword,
-                          isBusy: state.searchBusy) {
-                state.doSearch()
-            }
-            .padding(.horizontal, DS.Space.l)
-
-            ScrollView(.vertical) {
-                LazyVStack(spacing: 2) {
-                    if state.searchResults.isEmpty {
-                        if state.searchBusy {
-                            ProgressView().controlSize(.small).padding(.top, 60)
-                        } else {
-                            DSEmptyState(systemImage: "magnifyingglass",
-                                         title: "搜索网易云曲库",
-                                         message: "输入歌名或歌手, 回车开始搜索")
-                                .padding(.top, 30)
-                        }
-                    }
-                    ForEach(state.searchResults) { track in
-                        SearchResultRow(track: track)
-                            .padding(.horizontal, DS.Space.s)
-                    }
-                }
-                .padding(.bottom, 4)
-            }
-            .contentMargins(.bottom, 132, for: .scrollContent)
-            .scrollEdgeEffectStyle(.soft, for: .top)
-        }
-        .padding(.horizontal, DS.Space.popoverPadding - DS.Space.s)
-    }
-}
-
-private struct SearchResultRow: View {
-    @EnvironmentObject var state: AppState
-    let track: NCTrack
-
-    var body: some View {
-        DSListRow(title: track.name, subtitle: track.artists, height: 46) {
-            let index = state.appendTrack(track)
-            state.play(index: index)
-        } leading: {
-            CoverArtwork(url: track.coverURL, size: 34, radius: DS.Radius.artSmall,
-                         shadow: true, borderOpacity: 0.12)
-        } trailing: {
-            if track.vipOnly {
-                DSChip(text: "VIP", tone: .neutral, compact: true)
-            } else {
-                Image(systemName: "play.fill")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(DS.Palette.textQuaternary)
-            }
-        }
     }
 }
 

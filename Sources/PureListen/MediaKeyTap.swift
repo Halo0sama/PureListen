@@ -1,5 +1,6 @@
 import AppKit
 import Carbon.HIToolbox
+import PureListenCore
 
 /// 播放控制媒体键接管: 拦截 播放/暂停、上一曲、下一曲, 驱动本 App 播放控制。
 /// 音量键不拦截(由系统音量镜像联动)。需要"辅助功能"权限。
@@ -32,10 +33,8 @@ final class MediaKeyTap {
 
     private func start() {
         guard eventTap == nil else { return }
-        guard Self.hasPermission() else {
-            Self.requestPermission()
-            return
-        }
+        // 没有辅助功能权限时静默跳过（不主动弹系统授权窗，授权入口在设置页）。
+        guard Self.hasPermission() else { return }
         let mask = 1 << NX_SYSDEFINED
         guard let tap = CGEvent.tapCreate(tap: .cghidEventTap,
                                           place: .headInsertEventTap,
@@ -106,19 +105,19 @@ final class MediaKeyTap {
     }
 }
 
-/// 系统静音控制(用 mute 而非音量归零: 百分比保留, 音量联动不受影响)。
+/// 系统静音控制（用设备的 mute 属性而非音量归零：百分比保留，音量联动不受影响）。
+///
+/// 直接读写 CoreAudio（`SystemOutput`），不再使用 AppleScript —— 后者会触发
+/// 「自动化 / 设备控制和数据访问」授权，ad-hoc 签名下无法保持，导致反复弹窗。
 enum SystemMute {
     static func setMuted(_ muted: Bool) {
-        let script = NSAppleScript(source: "set volume output muted \(muted)")
-        var error: NSDictionary?
-        script?.executeAndReturnError(&error)
+        let applied = SystemOutput.setMuted(muted)
+        if !applied {
+            NCLog.log("[静音] ⚠ 无法设置系统静音(设备不支持 mute 属性?)")
+        }
     }
 
     static func isMuted() -> Bool {
-        guard let script = NSAppleScript(source: "output muted of (get volume settings)") else { return false }
-        var error: NSDictionary?
-        let output = script.executeAndReturnError(&error).stringValue?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return output == "true"
+        SystemOutput.isMuted() ?? false
     }
 }

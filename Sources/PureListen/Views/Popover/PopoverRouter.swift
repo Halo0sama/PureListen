@@ -5,22 +5,12 @@ import PureListenCore
 
 enum PopoverTab: Hashable, CaseIterable {
     case playlists
-    case search
     case bilibili
 
     var title: String {
         switch self {
         case .playlists: return "歌单"
-        case .search: return "搜索"
         case .bilibili: return "B站"
-        }
-    }
-
-    var icon: String {
-        switch self {
-        case .playlists: return "square.stack"
-        case .search: return "magnifyingglass"
-        case .bilibili: return "play.rectangle"
         }
     }
 }
@@ -28,6 +18,8 @@ enum PopoverTab: Hashable, CaseIterable {
 enum PopoverRoute: Equatable {
     case home
     case playlist
+    case search
+    case nowPlaying
     case settings
 }
 
@@ -36,19 +28,27 @@ final class PopoverRouter: ObservableObject {
     @Published var route: PopoverRoute = .home
     @Published var tab: PopoverTab = .playlists
 
-    func openPlaylist() {
-        withAnimation(DS.Motion.page) { route = .playlist }
+    /// 简单历史栈: 让"返回"回到进入前的那一页（例如从歌单打开正在播放）。
+    private var history: [PopoverRoute] = []
+
+    func push(_ route: PopoverRoute) {
+        guard route != self.route else { return }
+        history.append(self.route)
+        withAnimation(DS.Motion.page) { self.route = route }
     }
 
-    func openSettings() {
-        withAnimation(DS.Motion.page) { route = .settings }
+    func openPlaylist() { push(.playlist) }
+    func openSearch() { push(.search) }
+    func openNowPlaying() { push(.nowPlaying) }
+    func openSettings() { push(.settings) }
+
+    func back() {
+        let target = history.popLast() ?? .home
+        withAnimation(DS.Motion.page) { route = target }
     }
 
     func home() {
-        withAnimation(DS.Motion.page) { route = .home }
-    }
-
-    func back() {
+        history.removeAll()
         withAnimation(DS.Motion.page) { route = .home }
     }
 }

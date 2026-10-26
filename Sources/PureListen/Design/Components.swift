@@ -242,15 +242,27 @@ struct DSPlayButton: View {
 
 // MARK: - 分段选择
 
-/// 胶囊分段控件: 毛玻璃底座 + matchedGeometry 高亮。
+/// 胶囊分段控件 —— macOS 27 Golden Gate 的 Liquid Glass 外观。
+///
+/// 交互对齐官方 Liquid Glass：整条是玻璃胶囊，选中项是一枚更亮的玻璃胶囊；
+/// 按住并拖动时，选中胶囊会像液态透镜一样跟随指针滑动，松手后落到指针所在分段。
 struct DSSegmented<Item: Hashable>: View {
     var items: [Item]
     var title: (Item) -> String
     @Binding var selection: Item
     var height: CGFloat = 30
+    /// 悬停到的分段(用于预加载对应页面，例如 B 站面板)。
+    var onHover: ((Item?) -> Void)? = nil
 
-    @Namespace private var highlight
     @Environment(\.dsIsDark) private var isDark
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.glassLensDebugPoint) private var debugPoint
+    @State private var hoveringItem: Item?
+    @State private var pressed = false
+    @State private var pointer: CGPoint?
+
+    private var isPressed: Bool { pressed || debugPoint != nil }
+    private var activePoint: CGPoint? { debugPoint ?? pointer }
 
     var body: some View {
         HStack(spacing: 2) {
@@ -258,36 +270,157 @@ struct DSSegmented<Item: Hashable>: View {
                 let isSelected = item == selection
                 Button {
                     guard !isSelected else { return }
-                    withAnimation(DS.Motion.standard) { selection = item }
+                    // 只让选中胶囊自己动画，内容切换不加动画（避免整页布局动画造成掉帧）。
+                    selection = item
                 } label: {
                     Text(title(item))
                         .font(.system(size: 11.5, weight: isSelected ? .semibold : .medium))
-                        .foregroundStyle(isSelected ? DS.Palette.textPrimary : DS.Palette.textSecondary)
+                        .foregroundStyle(isSelected ? DS.Palette.textPrimary
+                                                    : DS.Palette.textSecondary)
                         .frame(maxWidth: .infinity)
                         .frame(height: height - 6)
-                        .contentShape(Rectangle())
                         .background {
-                            if isSelected {
-                                RoundedRectangle(cornerRadius: DS.Radius.inner(12, inset: 3),
-                                                 style: .continuous)
-                                    .fill(isDark ? Color.white.opacity(0.14)
-                                                 : Color.white.opacity(0.95))
-                                    .shadow(color: .black.opacity(isDark ? 0.28 : 0.10),
-                                            radius: 4, y: 1)
-                                    .matchedGeometryEffect(id: "seg", in: highlight)
+                            if !isPressed, hoveringItem == item, !isSelected {
+                                Capsule(style: .continuous)
+                                    .fill(DS.Palette.surfaceHover)
                             }
                         }
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .onHover { inside in
+                    withAnimation(DS.Motion.quick) {
+                        hoveringItem = inside ? item : (hoveringItem == item ? nil : hoveringItem)
+                    }
+                    onHover?(inside ? item : nil)
+                }
             }
         }
         .padding(3)
         .background {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(DS.Palette.surface)
+            GeometryReader { geo in
+                selectionLayer(size: geo.size)
+            }
+        }
+        .modifier(SegmentedGlassTrack(reduceTransparency: reduceTransparency, height: height))
+        .modifier(GlassPointerTracking(enabled: !reduceTransparency,
+                                       pressed: $pressed,
+                                       point: $pointer,
+                                       onPressEnded: commit))
+    }
+
+    // MARK: 布局
+
+    private func metrics(in size: CGSize) -> (segWidth: CGFloat, pillWidth: CGFloat, selectedX: CGFloat) {
+        let count = CGFloat(max(items.count, 1))
+        let usable = max(size.width - 6, 1)
+        let segWidth = usable / count
+        let pillWidth = max(segWidth - 4, 10)
+        let index = CGFloat(items.firstIndex(of: selection) ?? 0)
+        return (segWidth, pillWidth, 3 + segWidth * (index + 0.5))
+    }
+
+    /// 选中胶囊 / 指针透镜所在的背景层：在文字与按钮之下、玻璃之上。
+    @ViewBuilder
+    private func selectionLayer(size: CGSize) -> some View {
+        let m = metrics(in: size)
+        let pillHeight = max(height - 8, 10)
+
+        if reduceTransparency {
+            Capsule(style: .continuous)
+                .fill(DS.Palette.surfaceSelected)
                 .overlay {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    Capsule(style: .continuous)
                         .strokeBorder(DS.Palette.hairline, lineWidth: 1)
+                }
+                .frame(width: m.pillWidth, height: pillHeight)
+                .position(x: m.selectedX, y: size.height / 2)
+                .allowsHitTesting(false)
+        } else {
+            // 按下时整枚透镜胶囊整体放大（宽高同比），而不是左右拉伸。
+            let lensScale: CGFloat = isPressed ? 1.40 : 1
+            let pressedX: CGFloat = {
+                guard isPressed, let point = activePoint else { return m.selectedX }
+                // 放大后的透镜允许越出轨道边缘一点（官方那种"出框"感），但不要越出弹窗。
+                let half = m.pillWidth * lensScale / 2
+                let overhang: CGFloat = 8
+                let lower = max(half - overhang, 0)
+                let upper = min(size.width - half + overhang, size.width)
+                return min(max(point.x, lower), upper)
+            }()
+
+            ZStack {
+                // 选择胶囊：拖动时跟随指针，松手弹到目标分段
+                Capsule(style: .continuous)
+                    .fill(isDark ? Color.white.opacity(0.17) : Color.white.opacity(0.94))
+                    .overlay {
+                        Capsule(style: .continuous)
+                            .strokeBorder(
+                                isPressed
+                                    ? LinearGradient(colors: [Color(red: 0.55, green: 0.95, blue: 1.0).opacity(0.45),
+                                                              Color.white.opacity(0.45),
+                                                              Color(red: 1.0, green: 0.55, blue: 0.90).opacity(0.25)],
+                                                     startPoint: .topLeading, endPoint: .bottomTrailing)
+                                    : LinearGradient(colors: [Color.white.opacity(isDark ? 0.44 : 0.9),
+                                                              Color.white.opacity(isDark ? 0.06 : 0.2)],
+                                                     startPoint: .top, endPoint: .bottom),
+                                lineWidth: isPressed ? 1.2 : 0.8)
+                    }
+                    .frame(width: m.pillWidth, height: pillHeight)
+                    .scaleEffect(lensScale)
+                    .shadow(color: .black.opacity(isDark ? (isPressed ? 0.40 : 0.30)
+                                                        : (isPressed ? 0.20 : 0.12)),
+                            radius: isPressed ? 10 : 3,
+                            y: isPressed ? 3 : 1)
+                    .position(x: pressedX, y: size.height / 2)
+                    .animation(DS.Motion.standard, value: pressedX)
+                    .animation(DS.Motion.press, value: isPressed)
+            }
+            .allowsHitTesting(false)
+        }
+    }
+
+    // MARK: 按拖选择
+
+    private func commit(_ point: CGPoint, _ size: CGSize) {
+        guard !items.isEmpty else { return }
+        let m = metrics(in: size)
+        let raw = Int(((point.x - 3) / max(m.segWidth, 1)).rounded(.down))
+        let clamped = min(max(raw, 0), items.count - 1)
+        let target = items[clamped]
+        guard target != selection else { return }
+        selection = target
+    }
+}
+
+/// 分段控件的玻璃底座：正常外观用真实 Liquid Glass；降低透明度时退化为实体胶囊。
+private struct SegmentedGlassTrack: ViewModifier {
+    var reduceTransparency: Bool
+    var height: CGFloat
+    @Environment(\.dsIsDark) private var isDark
+
+    func body(content: Content) -> some View {
+        if reduceTransparency {
+            content
+                .background {
+                    Capsule(style: .continuous)
+                        .fill(DS.Palette.surfaceSelected)
+                        .overlay {
+                            Capsule(style: .continuous)
+                                .strokeBorder(DS.Palette.hairline, lineWidth: 1)
+                        }
+                }
+        } else {
+            content
+                .glassEffect(.regular.interactive(), in: Capsule(style: .continuous))
+                .overlay {
+                    Capsule(style: .continuous)
+                        .strokeBorder(
+                            LinearGradient(colors: [Color.white.opacity(isDark ? 0.26 : 0.75),
+                                                    Color.white.opacity(isDark ? 0.06 : 0.2)],
+                                           startPoint: .top, endPoint: .bottom),
+                            lineWidth: 0.8)
+                        .allowsHitTesting(false)
                 }
         }
     }
@@ -735,5 +868,125 @@ struct DSSwitch: View {
         .accessibilityElement()
         .accessibilityLabel(isOn ? "已开启" : "已关闭")
         .accessibilityAddTraits(isOn ? [.isButton, .isSelected] : .isButton)
+    }
+}
+
+// MARK: - 玻璃工具组(Golden Gate toolbar clusters)
+
+/// 独立的玻璃圆钮: 工具栏里那种一颗一颗的小玻璃圆。
+struct DSGlassIconButton: View {
+    var systemName: String
+    var help: String
+    var diameter: CGFloat = 30
+    var iconSize: CGFloat = 11
+    var action: () -> Void
+
+    @State private var hovering = false
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.dsIsDark) private var isDark
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: iconSize, weight: .semibold))
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(hovering ? DS.Palette.textPrimary : DS.Palette.textSecondary)
+                .frame(width: diameter - 10, height: diameter - 10)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .padding(5)
+        .modifier(GlassToolbarTrack(reduceTransparency: reduceTransparency, isDark: isDark,
+                                    hovered: hovering, shape: AnyShape(Capsule(style: .continuous))))
+        .modifier(GlassIconPointerLens(enabled: !reduceTransparency, pressScale: 1.20))
+        .onHover { inside in
+            withAnimation(DS.Motion.quick) { hovering = inside }
+        }
+        .help(help)
+        .accessibilityLabel(help)
+    }
+}
+
+/// 带文字的玻璃胶囊按钮(例如「窗口模式」)。
+struct DSGlassPillButton: View {
+    var title: String
+    var systemImage: String? = nil
+    var height: CGFloat = 30
+    var action: () -> Void
+
+    @State private var hovering = false
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.dsIsDark) private var isDark
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                if let systemImage {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .symbolRenderingMode(.hierarchical)
+                }
+                Text(title)
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .foregroundStyle(hovering ? DS.Palette.textPrimary : DS.Palette.textSecondary)
+            .padding(.horizontal, 9)
+            .frame(height: height - 10)
+            .contentShape(Capsule(style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .padding(5)
+        .modifier(GlassToolbarTrack(reduceTransparency: reduceTransparency, isDark: isDark,
+                                    hovered: hovering, shape: AnyShape(Capsule(style: .continuous))))
+        .modifier(GlassIconPointerLens(enabled: !reduceTransparency, pressScale: 1.14))
+        .onHover { inside in
+            withAnimation(DS.Motion.quick) { hovering = inside }
+        }
+        .accessibilityLabel(title)
+    }
+}
+
+/// 工具栏玻璃底: 正常用真实 Liquid Glass, 降低透明度时退化为实体胶囊。
+private struct GlassToolbarTrack: ViewModifier {
+    var reduceTransparency: Bool
+    var isDark: Bool
+    var hovered: Bool
+    var shape: AnyShape
+
+    func body(content: Content) -> some View {
+        if reduceTransparency {
+            content
+                .background {
+                    shape.fill(hovered ? DS.Palette.surfaceSelected : DS.Palette.surface)
+                        .overlay { shape.stroke(DS.Palette.hairline, lineWidth: 1) }
+                }
+        } else {
+            content
+                .glassEffect(.regular.interactive(), in: shape)
+                .overlay {
+                    shape.stroke(
+                        LinearGradient(colors: [Color.white.opacity(isDark ? 0.24 : 0.7),
+                                                Color.white.opacity(isDark ? 0.05 : 0.15)],
+                                       startPoint: .top, endPoint: .bottom),
+                        lineWidth: 0.8)
+                        .allowsHitTesting(false)
+                }
+                .brightness(hovered ? 0.02 : 0)
+        }
+    }
+}
+
+/// 小圆钮/胶囊钮的指针透镜: 按下时整枚玻璃胶囊放大成透镜。
+private struct GlassIconPointerLens: ViewModifier {
+    var enabled: Bool
+    var pressScale: CGFloat
+
+    func body(content: Content) -> some View {
+        if enabled {
+            content.glassPointerLens(in: Capsule(style: .continuous),
+                                     pressScale: pressScale)
+        } else {
+            content
+        }
     }
 }
