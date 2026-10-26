@@ -384,3 +384,33 @@ extension EnvironmentValues {
         set { self[SettingsPreviewScrollKey.self] = newValue }
     }
 }
+
+struct SettingsAccountRow<Actions: View>: View {
+    var avatarURL: String
+    var name: String
+    var service: String
+    var metrics: SettingsMetrics
+    @ViewBuilder var actions: () -> Actions
+
+    var body: some View {
+        HStack(spacing: metrics.controlSpacing) {
+            if !avatarURL.isEmpty {
+                CoverArtwork(url: avatarURL, size: 32, radius: DS.Radius.artSmall)
+            } else {
+                Image(systemName: "person.fill")
+                    .font(.system(size: 14))
+                    .foregroundStyle(DS.Palette.textSecondary)
+                    .frame(width: 32, height: 32)
+                    .background(DS.Palette.surfaceSelected, in: RoundedRectangle(cornerRadius: DS.Radius.artSmall))
+            }
+            VStack(alignment: .leading, spacing: metrics.rowSpacing) {
+                Text(name).font(metrics.titleFont).foregroundStyle(DS.Palette.textPrimary).lineLimit(1)
+                Text(service).font(metrics.subtitleFont).foregroundStyle(DS.Palette.textSecondary)
+            }
+            Spacer(minLength: 8)
+            actions()
+        }
+        .padding(.horizontal, metrics.rowHorizontalPadding)
+        .padding(.vertical, metrics.rowVerticalPadding)
+    }
+}

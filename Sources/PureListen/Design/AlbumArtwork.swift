@@ -2,6 +2,7 @@ import AppKit
 import CoreImage
 import CoreImage.CIFilterBuiltins
 import SwiftUI
+import PureListenCore
 
 // MARK: - 封面缓存
 
@@ -44,7 +45,8 @@ final class ArtworkCache {
     }
 
     private static func download(url: String, size: Int) async -> NSImage? {
-        guard var comps = URLComponents(string: url) else { return nil }
+        let normalized = url.hasPrefix("//") ? "https:" + url : url
+        guard var comps = URLComponents(string: normalized) else { return nil }
         // 网易云图床支持 param 缩略; 其他源忽略亦可。
         if comps.host?.contains("126.net") == true {
             comps.queryItems = [URLQueryItem(name: "param", value: "\(size)y\(size)")]
@@ -52,7 +54,9 @@ final class ArtworkCache {
         guard let source = comps.url else { return nil }
         var request = URLRequest(url: source)
         request.timeoutInterval = 12
-        guard let (data, _) = try? await URLSession.shared.data(for: request),
+        let session = URLSession(configuration: NetworkMode.current.sessionConfiguration())
+        defer { session.finishTasksAndInvalidate() }
+        guard let (data, _) = try? await session.data(for: request),
               let image = NSImage(data: data) else { return nil }
         return image
     }
@@ -134,17 +138,26 @@ struct AlbumPalette: Equatable {
 
     static let neutral = AlbumPalette(hue: 0.58, saturation: 0.0, brightness: 0.5, isChromatic: false)
 
-    /// 界面主色(深色模式偏亮, 浅色模式偏深)。
-    var tint: Color {
-        let s = isChromatic ? min(max(saturation * 0.92, 0.42), 0.78) : 0.0
-        let b = isChromatic ? min(max(brightness * 1.02, 0.66), 0.90) : 0.0
-        return Color(nsColor: NSColor(hue: hue, saturation: s, brightness: b, alpha: 1))
-    }
+    var tint: Color { accessibleTint(dark: true) }
+    var tintLight: Color { accessibleTint(dark: false) }
 
-    var tintLight: Color {
-        let s = isChromatic ? min(max(saturation * 0.95, 0.5), 0.85) : 0.0
-        let b = isChromatic ? min(max(brightness * 0.62, 0.34), 0.55) : 0.0
-        return Color(nsColor: NSColor(hue: hue, saturation: s, brightness: b, alpha: 1))
+    private func accessibleTint(dark: Bool) -> Color {
+        guard isChromatic else { return dark ? .white.opacity(0.9) : .black.opacity(0.86) }
+        var color = NSColor(hue: hue, saturation: min(max(saturation * 0.92, 0.42), 0.78),
+                            brightness: min(max(brightness, 0.66), 0.90), alpha: 1).srgb
+        func luminance(_ color: NSColor) -> CGFloat {
+            func linear(_ value: CGFloat) -> CGFloat {
+                value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4)
+            }
+            return linear(color.redComponent) * 0.2126 + linear(color.greenComponent) * 0.7152
+                + linear(color.blueComponent) * 0.0722
+        }
+        for _ in 0..<32 {
+            let light = luminance(color)
+            if dark ? light >= 0.30 : light <= 0.12 { break }
+            color = (color.blended(withFraction: 0.08, of: dark ? .white : .black) ?? color).srgb
+        }
+        return Color(nsColor: color)
     }
 
     /// 深色画布上的大面积晕染。

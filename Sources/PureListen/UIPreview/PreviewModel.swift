@@ -34,6 +34,10 @@ enum UIPreviewData {
         status.resampled = false
         status.format = "flac"
         status.level = "lossless"
+        status.sizeBytes = 28462173
+        status.bitrate = 896000
+        status.sourceHost = "audio.example.com"
+        status.sourceDetail = "Async"
         status.exclusive = true
         status.seconds = 254
         status.positionSeconds = 87
@@ -54,6 +58,7 @@ enum UIPreviewData {
 
         state.biliPhase = .loggedIn
         state.biliUname = "Halo0sama"
+        state.biliAvatarURL = "preview://avatar/2"
         state.favFolders = previewFavFolders()
         state.favVideos = previewFavVideos()
 
@@ -62,6 +67,8 @@ enum UIPreviewData {
 
         state.previewSetLoginQR("https://music.163.com/login?codekey=preview-8f3a2c")
         state.previewSetBiliQR("https://passport.bilibili.com/h5-app/passport/login/scan?navhide=1&qrcode_key=preview-bili")
+        state.biliPhase = .loggedIn
+        state.loginPhase = .loggedIn
         return state
     }
 
@@ -209,7 +216,7 @@ enum PreviewArtwork {
 
         let hash = stableHash(seed)
         var rng = SplitMix64(seed: hash)
-        var hue = Double(hash % 360) / 360
+        let hue = Double(hash % 360) / 360
         let hueB = (hue + 0.06 + Double(rng.next() % 90) / 500).truncatingRemainder(dividingBy: 1)
         let hueC = (hue + 0.46 + Double(rng.next() % 60) / 400).truncatingRemainder(dividingBy: 1)
         // `preview://cover/N` 的 N 直接决定构图(0 光晕 / 1 斜切 / 2 同心 / 3 色带 /

@@ -1,7 +1,19 @@
 import XCTest
+import PureListenCore
 @testable import PureListen
 
 final class VolumeMirrorTests: XCTestCase {
+    func testExclusiveOutputCanBeReadWhenDefaultOutputIsUnavailable() {
+        let fallback = SystemOutput.Identity(id: 86, uid: "dac")
+        XCTAssertEqual(VolumeMirror.snapshot(defaultDevice: nil, fallbackDevice: fallback,
+                                             volume: { _ in 0.2 }),
+                       .init(deviceID: 86, uid: "dac", volume: 0.2))
+        let system = SystemOutput.Identity(id: 74, uid: "speakers")
+        XCTAssertEqual(VolumeMirror.snapshot(defaultDevice: system, fallbackDevice: fallback,
+                                             volume: { $0 == 74 ? Float.nan : Float(0.4) })?.volume, 0.4)
+        XCTAssertEqual(VolumeMirror.snapshot(defaultDevice: system, fallbackDevice: fallback,
+                                             volume: { $0 == 74 ? Float(0.6) : Float(1) })?.deviceID, 74)
+    }
     func testRouteChangesAndDelayedFullVolumeOnlyResetBaseline() {
         var time = Date()
         var snapshot: VolumeMirror.Snapshot? = .init(deviceID: 1, uid: "speakers", volume: 0.2)

@@ -29,6 +29,9 @@ final class AppState: ObservableObject {
     @Published var level: NCLevel = .lossless {
         didSet { defaults.set(level.rawValue, forKey: "level") }
     }
+    @Published var biliQuality: BiliAudioQuality = .high {
+        didSet { defaults.set(biliQuality.rawValue, forKey: "biliQuality") }
+    }
     @Published var networkMode: NetworkMode = .direct {
         didSet { defaults.set(networkMode.rawValue, forKey: "networkMode") }
     }
@@ -61,6 +64,7 @@ final class AppState: ObservableObject {
     }
     @Published var biliPhase: BiliPhase = .idle
     @Published var biliUname: String = ""
+    @Published var biliAvatarURL: String = ""
     let biliClient: BiliClient
     private var biliPollTask: Task<Void, Never>?
     @Published private(set) var biliQRURL: String?
@@ -72,7 +76,21 @@ final class AppState: ObservableObject {
     @Published var currentFavFolder: BiliClient.FavFolder?
     @Published private(set) var favHasMore = false
     private var favPage = 1
+    private var favLoadID = UUID()
     @Published var favBusy = false
+    private var requestedFolderCovers: Set<Int> = []
+
+    func loadFolderCover(_ folder: BiliClient.FavFolder) async {
+        guard folder.cover.isEmpty, !previewMode,
+              requestedFolderCovers.insert(folder.id).inserted else { return }
+        guard let cover = try? await biliClient.favoriteFolderCover(id: folder.id), !cover.isEmpty,
+              !Task.isCancelled,
+              let index = favFolders.firstIndex(where: { $0.id == folder.id }) else {
+            requestedFolderCovers.remove(folder.id)
+            return
+        }
+        favFolders[index].cover = cover
+    }
 
     func loadFavFolders() async {
         guard biliClient.isLoggedIn, biliMid != 0 else { return }
@@ -83,17 +101,23 @@ final class AppState: ObservableObject {
     }
 
     func openFavFolder(_ folder: BiliClient.FavFolder) async {
-        currentFavFolder = folder
-        favVideos = []
+        withAnimation(DS.Motion.page) {
+            currentFavFolder = folder
+            favVideos = []
+        }
         favPage = 1
+        favLoadID = UUID()
         await loadMoreFavs(reset: true)
     }
 
     func loadMoreFavs(reset: Bool = false) async {
-        guard let folder = currentFavFolder else { return }
+        guard let folder = currentFavFolder, reset || !favBusy else { return }
+        let requestID = favLoadID
+        let page = favPage
         favBusy = true
-        defer { favBusy = false }
-        if let (videos, more) = try? await biliClient.favoriteVideos(folderId: folder.id, page: favPage) {
+        defer { if requestID == favLoadID { favBusy = false } }
+        if let (videos, more) = try? await biliClient.favoriteVideos(folderId: folder.id, page: page),
+           requestID == favLoadID, currentFavFolder?.id == folder.id {
             favVideos += videos
             favHasMore = more
             favPage += 1
@@ -154,7 +178,7 @@ final class AppState: ObservableObject {
     /// 「接管媒体键」开关时请求一次授权，其余时候只在设置页给一条可点击的提示。
     private func updateMediaKeyTap() {
         guard !previewMode else { return }
-        let need = playbackActive || mediaControlKeysEnabled
+        let need = (systemVolumeMirror && playbackActive) || mediaControlKeysEnabled
         let permitted = MediaKeyTap.hasPermission()
         mediaKeyTap.isEnabled = need && permitted
         if need && !permitted && !permissionPromptShown {
@@ -162,7 +186,7 @@ final class AppState: ObservableObject {
             NCLog.log("[媒体键] 未获得辅助功能权限, 媒体键接管暂不可用; 可在 设置 → 播放保护 中重新授权")
         }
         // 用户可能正在系统设置里授权：轻量轮询（只查询、不弹窗），授权后立刻启用接管。
-        if mediaControlKeysEnabled && !permitted {
+        if need && !permitted {
             startPermissionPolling()
         } else {
             stopPermissionPolling()
@@ -241,6 +265,8 @@ final class AppState: ObservableObject {
         Task {
             if let account = try? await biliClient.account() {
                 biliUname = account.uname
+                biliAvatarURL = account.avatarURL
+                defaults.set(account.avatarURL, forKey: "biliAvatarURL")
                 biliMid = account.mid
                 defaults.set(account.mid, forKey: "biliMid")
                 NCLog.log("B站账号: \(account.uname) mid=\(account.mid)")
@@ -260,6 +286,7 @@ final class AppState: ObservableObject {
         didSet {
             defaults.set(systemVolumeMirror, forKey: "volumeMirror")
             if systemVolumeMirror && !previewMode { volumeMirror.start() } else { volumeMirror.stop() }
+            updateMediaKeyTap()
         }
     }
     let volumeMirror = VolumeMirror()
@@ -322,11 +349,15 @@ final class AppState: ObservableObject {
         autoDevice = !defaults.bool(forKey: "devicePinned")
         if !previewMode { setupHotplugListener() }
         biliMid = defaults.integer(forKey: "biliMid")
+        biliAvatarURL = defaults.string(forKey: "biliAvatarURL") ?? ""
+        biliQuality = BiliAudioQuality(rawValue: defaults.string(forKey: "biliQuality") ?? "") ?? .high
         if biliClient.isLoggedIn && !previewMode {
             biliPhase = .loggedIn
             Task {
                 if let account = try? await biliClient.account() {
                     biliUname = account.uname
+                    biliAvatarURL = account.avatarURL
+                    defaults.set(account.avatarURL, forKey: "biliAvatarURL")
                     biliMid = account.mid
                     defaults.set(account.mid, forKey: "biliMid")
                 }
@@ -342,18 +373,21 @@ final class AppState: ObservableObject {
         networkMode = NetworkMode.load(from: defaults)
         autoResume = defaults.object(forKey: "autoResume") == nil ? true : defaults.bool(forKey: "autoResume")
         // 系统音量 → App 音量镜像(0.4s 轮询, 拖动滑条后 2 秒内不覆盖)
+        volumeMirror.fallbackDevice = { [weak self] in
+            guard let device = self?.selectedDevice else { return nil }
+            return SystemOutput.Identity(id: device.id, uid: device.uid)
+        }
         volumeMirror.onSystemVolume = { [weak self] value in
             Task { @MainActor in
                 guard let self else { return }
                 // 插拔后的等待状态不接受系统设备的初始音量（USB 设备常报告 100%）。
-                guard !self.outputNeedsUserPlay else { return }
+                guard self.systemVolumeMirror, !self.outputNeedsUserPlay else { return }
                 if let manualAt = self.manualVolumeAt,
                    Date().timeIntervalSince(manualAt) < 2.0 { return }
                 self.volume = value
                 if self.muteSystemWhileRunning && self.playbackActive {
                     self.applyMutePolicy()
                     self.systemMuteSession?.ensureMuted()
-                    self.volumeMirror.rebase()
                 }
             }
         }
@@ -373,8 +407,9 @@ final class AppState: ObservableObject {
         }
         mediaKeyTap.shouldInterceptVolume = { [weak self] in
             guard let self else { return false }
-            return self.playbackActive
+            return self.systemVolumeMirror && self.playbackActive
         }
+        mediaKeyTap.shouldInterceptPlayback = { [weak self] in self?.mediaControlKeysEnabled ?? false }
         mediaKeyTap.onPlayPause = { [weak self] in
             Task { @MainActor in self?.playPause() }
         }
@@ -762,6 +797,10 @@ final class AppState: ObservableObject {
                 status.artist = track.artists
                 status.format = result.format
                 status.level = result.level
+                status.sizeBytes = result.sizeBytes
+                status.bitrate = result.br
+                status.sourceHost = URL(string: url)?.host ?? ""
+                status.sourceDetail = track.album
                 beginLocalPlayback(url: local, metadata: status, resumeAt: resumeAt)
             } catch {
                 guard isCurrentPlayback(requestID) else { return }
@@ -785,13 +824,23 @@ final class AppState: ObservableObject {
             defer { finishPlaybackRequest(requestID) }
             do {
                 try Task.checkCancellation()
-                let local = try await downloadAudio(item.downloadURL, item.format, item.headers)
+                var local = try await downloadAudio(item.downloadURL, item.format, item.headers)
+                guard isCurrentPlayback(requestID) else { return }
+                if item.codec.lowercased() == "flac" {
+                    playerState = .loading("准备 Hi-Res 音轨…")
+                    local = try await FLACContainer.prepare(local)
+                }
                 guard isCurrentPlayback(requestID) else { return }
                 var status = ExclusivePlayer.TrackStatus()
                 status.title = item.title
                 status.artist = item.artist
                 status.format = item.format
-                status.level = item.source.rawValue
+                status.level = item.quality.isEmpty ? item.source.rawValue : item.quality
+                status.sizeBytes = item.sizeBytes
+                status.bitrate = item.bitrate
+                status.codec = item.codec
+                status.sourceHost = URL(string: item.downloadURL)?.host ?? ""
+                status.sourceDetail = item.detail
                 beginLocalPlayback(url: local, metadata: status, resumeAt: resumeAt)
             } catch {
                 guard isCurrentPlayback(requestID) else { return }
@@ -822,7 +871,7 @@ final class AppState: ObservableObject {
                     guard let id = Int(value) else { throw URLError(.badURL) }
                     items = [try await SourceResolver.resolveNetease(id: id, client: client, level: level)]
                 case "bilibili":
-                    items = try await SourceResolver.resolveBilibili(value, bili: biliClient)
+                    items = try await SourceResolver.resolveBilibili(value, bili: biliClient, quality: biliQuality)
                 case "direct":
                     items = [SourceResolver.resolveDirect(value)]
                 default: throw URLError(.badURL)
@@ -868,6 +917,10 @@ final class AppState: ObservableObject {
 
     /// 下载完成与断线后的本地恢复共用入口；调用方已确认设备与请求身份。
     func beginLocalPlayback(url: URL, metadata: ExclusivePlayer.TrackStatus, resumeAt: Double?) {
+        var metadata = metadata
+        if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize {
+            metadata.sizeBytes = Int64(size)
+        }
         loadedPlayback = LoadedPlayback(url: url, metadata: metadata)
         if let startLocalAudio {
             startLocalAudio(url, metadata, resumeAt)
@@ -966,6 +1019,8 @@ final class AppState: ObservableObject {
                             }
                             if let account = try? await self.biliClient.account() {
                                 self.biliUname = account.uname
+                                self.biliAvatarURL = account.avatarURL
+                                self.defaults.set(account.avatarURL, forKey: "biliAvatarURL")
                                 self.biliMid = account.mid
                                 self.defaults.set(account.mid, forKey: "biliMid")
                                 NCLog.log("B站账号: \(account.uname) mid=\(account.mid)")
@@ -1002,6 +1057,14 @@ final class AppState: ObservableObject {
         defaults.removeObject(forKey: "biliCookies")
         biliPhase = .idle
         biliUname = ""
+        biliAvatarURL = ""
+        defaults.removeObject(forKey: "biliAvatarURL")
+        favFolders = []
+        favVideos = []
+        currentFavFolder = nil
+        requestedFolderCovers.removeAll()
+        favLoadID = UUID()
+        favBusy = false
     }
 
     /// 把搜索到的歌临时加入当前队列(追加到"搜索结果歌单")。

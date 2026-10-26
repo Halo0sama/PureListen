@@ -154,14 +154,14 @@ public final class BiliClient {
     }
 
     /// 登录用户信息。
-    public func account() async throws -> (uname: String, mid: Int)? {
+    public func account() async throws -> (uname: String, mid: Int, avatarURL: String)? {
         let resp = try await HTTPTask.get(
             url: "https://api.bilibili.com/x/web-interface/nav",
             headers: apiHeaders(withCookie: true))
         guard let data = resp.json["data"] as? [String: Any],
               let mid = data["mid"] as? Int else { return nil }
         let uname = (data["uname"] as? String) ?? "B站用户"
-        return (uname, mid)
+        return (uname, mid, (data["face"] as? String) ?? "")
     }
 
     public func logout() {
@@ -181,11 +181,13 @@ public final class BiliClient {
         public var id: Int
         public var title: String
         public var mediaCount: Int
+        public var cover: String
 
-        public init(id: Int, title: String, mediaCount: Int) {
+        public init(id: Int, title: String, mediaCount: Int, cover: String = "") {
             self.id = id
             self.title = title
             self.mediaCount = mediaCount
+            self.cover = cover
         }
     }
 
@@ -214,8 +216,18 @@ public final class BiliClient {
             guard let id = folder["id"] as? Int else { return nil }
             return FavFolder(id: id,
                              title: (folder["title"] as? String) ?? "收藏夹",
-                             mediaCount: (folder["media_count"] as? Int) ?? 0)
+                             mediaCount: (folder["media_count"] as? Int) ?? 0,
+                             cover: (folder["cover"] as? String) ?? "")
         }
+    }
+
+    public func favoriteFolderCover(id: Int) async throws -> String {
+        let resp = try await HTTPTask.get(
+            url: "https://api.bilibili.com/x/v3/fav/folder/info?media_id=\(id)",
+            headers: apiHeaders(withCookie: true))
+        if let data = resp.json["data"] as? [String: Any],
+           let cover = data["cover"] as? String, !cover.isEmpty { return cover }
+        return try await favoriteVideos(folderId: id, page: 1, pageSize: 1).videos.first?.cover ?? ""
     }
 
     /// 收藏夹内视频(分页)。

@@ -2,8 +2,6 @@ import AppKit
 import Carbon.HIToolbox
 import PureListenCore
 
-/// 播放控制媒体键接管: 拦截 播放/暂停、上一曲、下一曲, 驱动本 App 播放控制。
-/// 音量键不拦截(由系统音量镜像联动)。需要"辅助功能"权限。
 final class MediaKeyTap {
     var onPlayPause: (() -> Void)?
     var onNext: (() -> Void)?
@@ -12,6 +10,19 @@ final class MediaKeyTap {
     var onMuteToggle: (() -> Void)?
     /// 事件时判断: 是否拦截音量键(播放中拦截, 防止系统重写硬件音量引发扬声器爆音)。
     var shouldInterceptVolume: (() -> Bool)?
+    var shouldInterceptPlayback: (() -> Bool)?
+
+    struct KeyEvent: Equatable {
+        let code: Int
+        let isDown: Bool
+        init?(data1: Int, subtype: Int) {
+            guard subtype == 8 else { return nil }
+            let state = (data1 >> 8) & 0xFF
+            guard state == 0x0A || state == 0x0B else { return nil }
+            code = (data1 >> 16) & 0xFFFF
+            isDown = state == 0x0A
+        }
+    }
 
     var isEnabled = false {
         didSet {
@@ -20,6 +31,7 @@ final class MediaKeyTap {
     }
 
     private var eventTap: CFMachPort?
+    private var runLoopSource: CFRunLoopSource?
 
     static func hasPermission() -> Bool {
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false] as CFDictionary
@@ -45,62 +57,72 @@ final class MediaKeyTap {
             return mySelf.handle(type: type, event: event)
         }, userInfo: Unmanaged.passUnretained(self).toOpaque()) else { return }
         eventTap = tap
-        CFRunLoopAddSource(CFRunLoopGetMain(), CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0),
-                           .commonModes)
+        runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
     }
 
     private func stop() {
         if let tap = eventTap {
             CGEvent.tapEnable(tap: tap, enable: false)
-            CFRunLoopSourceInvalidate(CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0))
+            if let runLoopSource {
+                CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+                CFRunLoopSourceInvalidate(runLoopSource)
+            }
+            CFMachPortInvalidate(tap)
+            runLoopSource = nil
             eventTap = nil
         }
     }
 
     private func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
-        if type == .tapDisabledByTimeout, let tap = eventTap {
+        if (type == .tapDisabledByTimeout || type == .tapDisabledByUserInput), let tap = eventTap {
             CGEvent.tapEnable(tap: tap, enable: true)
             return nil
         }
         // NX_SYSDEFINED = 14
         guard type.rawValue == 14, let nsEvent = NSEvent(cgEvent: event),
-              nsEvent.type == .systemDefined, let sysInt = nsEvent.data1 as? Int else {
-            return Unmanaged.passRetained(event)
+              nsEvent.type == .systemDefined,
+              let key = KeyEvent(data1: nsEvent.data1, subtype: Int(nsEvent.subtype.rawValue)) else {
+            return Unmanaged.passUnretained(event)
         }
-        let keyCode = sysInt & 0xFFFF
-        let keyFlags = (sysInt >> 16) & 0xFFFF
-        let keyDown = keyFlags == 0x0A   // NX_KEYDOWN
+        return handleKey(key) ? nil : Unmanaged.passUnretained(event)
+    }
 
-        // SOUND_DOWN=0 SOUND_UP=1 MUTE=7 PLAY=16 NEXT=17 PREVIOUS=18 FAST=19 REWIND=20
+    @discardableResult
+    func handleKey(_ key: KeyEvent) -> Bool {
+        let keyCode = key.code
+        let keyDown = key.isDown
+
         if shouldInterceptVolume?() ?? false {
             let step: Float = 1.0 / 16.0
             switch keyCode {
             case 0:
-                if keyDown { onVolumeChange?(-step) }
-                return nil
-            case 1:
                 if keyDown { onVolumeChange?(step) }
-                return nil
+                return true
+            case 1:
+                if keyDown { onVolumeChange?(-step) }
+                return true
             case 7:
                 if keyDown { onMuteToggle?() }
-                return nil
+                return true
             default:
                 break
             }
         }
+        guard shouldInterceptPlayback?() ?? true else { return false }
         switch keyCode {
         case 16:
             if keyDown { onPlayPause?() }
-            return nil
+            return true
         case 17, 19:
             if keyDown { onNext?() }
-            return nil
+            return true
         case 18, 20:
             if keyDown { onPrevious?() }
-            return nil
+            return true
         default:
-            return Unmanaged.passRetained(event)
+            return false
         }
     }
 }

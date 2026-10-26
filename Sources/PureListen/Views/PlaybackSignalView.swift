@@ -31,6 +31,7 @@ struct PlaybackSignalView: View {
             VStack(spacing: 0) {
                 ForEach(Array(nodes.enumerated()), id: \.offset) { index, node in
                     nodeCard(node)
+                    if index == 0 { networkDetails }
                     if index < nodes.count - 1 {
                         connector(color: index == nodes.count - 2 ? outputTone : DS.Palette.mint)
                     }
@@ -50,6 +51,7 @@ struct PlaybackSignalView: View {
         }
         .scrollIndicators(.hidden)
         .scrollEdgeEffectStyle(.soft, for: .top)
+        .dsScrollFade(top: 12, bottom: 12)
     }
 
     private var outputTone: Color {
@@ -70,13 +72,13 @@ struct PlaybackSignalView: View {
         let deviceName = state.selectedDevice?.name ?? "输出设备未连接"
         let format = status.format.isEmpty ? "PCM" : status.format.uppercased()
         let source = state.currentSourceLabel
-        let sourceDetail = state.currentItem?.title ?? state.currentPlaylist?.name ?? "网易云音乐 · 曲库"
+        let sourceDetail = status.sourceDetail.isEmpty ? status.sourceHost : status.sourceDetail
 
         return [
             PlaybackSignalNode(
                 symbol: "music.note",
                 title: source,
-                detail: sourceDetail,
+                detail: sourceDetail.isEmpty ? status.title : sourceDetail,
                 trailing: WindowFormatting.levelShort(status.level, fallback: state.level),
                 badge: .none,
                 isStatus: false
@@ -114,6 +116,34 @@ struct PlaybackSignalView: View {
                 isStatus: false
             ),
         ]
+    }
+
+    private var networkDetails: some View {
+        let status = state.trackStatus
+        return VStack(alignment: .leading, spacing: 5) {
+            if status.sizeBytes > 0 {
+                networkRow("文件大小", ByteCountFormatter.string(fromByteCount: status.sizeBytes, countStyle: .file))
+            }
+            if status.bitrate > 0 { networkRow("码率", "\(status.bitrate / 1000) kbps") }
+            if !status.codec.isEmpty, status.codec.lowercased() != status.format.lowercased() {
+                networkRow("编码", status.codec)
+            }
+            if !status.sourceDetail.isEmpty && !status.sourceHost.isEmpty {
+                networkRow("音源主机", status.sourceHost)
+            }
+        }
+        .padding(.horizontal, compact ? 10 : 14)
+        .padding(.top, status.sizeBytes > 0 || status.bitrate > 0 ? 7 : 0)
+    }
+
+    private func networkRow(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(label).foregroundStyle(DS.Palette.textSecondary)
+            Spacer(minLength: 0)
+            Text(value).foregroundStyle(DS.Palette.textPrimary)
+                .multilineTextAlignment(.trailing).textSelection(.enabled)
+        }
+        .font(DS.TypeScale.caption)
     }
 
     private func nodeCard(_ node: PlaybackSignalNode) -> some View {

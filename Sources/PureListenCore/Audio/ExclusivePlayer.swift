@@ -19,6 +19,11 @@ public final class ExclusivePlayer {
         public var exclusive: Bool = false    // 是否成功独占
         public var seconds: Double = 0
         public var positionSeconds: Double = 0
+        public var sizeBytes: Int64 = 0
+        public var bitrate: Int = 0
+        public var codec: String = ""
+        public var sourceHost: String = ""
+        public var sourceDetail: String = ""
 
         public init() {}
     }

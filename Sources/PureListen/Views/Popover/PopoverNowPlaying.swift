@@ -4,7 +4,6 @@ import PureListenCore
 // MARK: - Popover 内的「正在播放」
 
 /// 菜单栏面板内的播放、歌词与链路，所有页面均留在小播放器中。
-/// 顶部「窗口模式」仍然可以打开独立的播放窗口。
 enum NowPlayingPane: Hashable, CaseIterable {
     case player, lyrics, signal
 
@@ -31,17 +30,20 @@ struct PopoverNowPlayingPage: View {
                         selection: $router.nowPlayingPane)
                 .frame(width: 222)
 
-            if router.nowPlayingPane == .signal {
-                PlaybackSignalView(compact: true)
-            } else if !hasTrack {
-                idle
-            } else if router.nowPlayingPane == .player {
-                playerPane
-            } else {
-                LyricsPane(lines: state.lyrics,
-                           activeIndex: state.lyricIndex,
-                           onSeek: { state.seek(to: $0) })
+            ZStack {
+                if router.nowPlayingPane == .signal {
+                    PlaybackSignalView(compact: true).transition(.opacity)
+                } else if !hasTrack {
+                    idle
+                } else if router.nowPlayingPane == .player {
+                    playerPane.transition(.opacity)
+                } else {
+                    LyricsPane(lines: state.lyrics,
+                               activeIndex: state.lyricIndex,
+                               onSeek: { state.seek(to: $0) }).transition(.opacity)
+                }
             }
+            .animation(DS.Motion.page, value: router.nowPlayingPane)
         }
         .padding(.horizontal, 22)
         .padding(.top, DS.Space.xs)
@@ -120,7 +122,10 @@ struct PopoverNowPlayingPage: View {
         HStack(spacing: 5) {
             DSChip(text: levelShort, tone: .neutral, compact: true)
             if state.trackStatus.fileRate > 0 {
-                DSChip(text: rateShort, tone: .neutral, compact: true)
+                DSChip(text: WindowFormatting.rate(state.trackStatus.fileRate), tone: .neutral, compact: true)
+            }
+            if state.trackStatus.fileBits > 0 {
+                DSChip(text: "\(state.trackStatus.fileBits) bit", tone: .neutral, compact: true)
             }
             if !state.trackStatus.format.isEmpty {
                 DSChip(text: state.trackStatus.format.uppercased(), tone: .neutral, compact: true)
@@ -196,18 +201,7 @@ struct PopoverNowPlayingPage: View {
     }
 
     private var levelShort: String {
-        switch state.level {
-        case .hires: return "Hi-Res"
-        case .lossless: return "无损"
-        case .exhigh: return "320k"
-        case .standard: return "128k"
-        }
-    }
-
-    private var rateShort: String {
-        let status = state.trackStatus
-        guard status.fileRate > 0 else { return "—" }
-        return String(format: "%.4g/%d", Double(status.fileRate) / 1000, status.fileBits)
+        WindowFormatting.levelShort(state.trackStatus.level, fallback: state.level)
     }
 
     private func format(_ seconds: Double) -> String {

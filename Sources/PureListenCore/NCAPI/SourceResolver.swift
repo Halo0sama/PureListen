@@ -20,14 +20,20 @@ public struct PlayableItem: Identifiable, Equatable {
     public var detail: String
     /// 网易歌曲 id(联动收藏等), 非网易为 0。
     public var neteaseID: Int
+    public var bitrate: Int
+    public var codec: String
+    public var quality: String
+    public var sizeBytes: Int64
 
     public init(id: String = UUID().uuidString, title: String, artist: String,
                 source: Source, downloadURL: String, format: String,
                 headers: [String: String] = [:], coverURL: String = "",
-                detail: String = "", neteaseID: Int = 0) {
+                detail: String = "", neteaseID: Int = 0,
+                bitrate: Int = 0, codec: String = "", quality: String = "", sizeBytes: Int64 = 0) {
         self.id = id; self.title = title; self.artist = artist; self.source = source
         self.downloadURL = downloadURL; self.format = format; self.headers = headers
         self.coverURL = coverURL; self.detail = detail; self.neteaseID = neteaseID
+        self.bitrate = bitrate; self.codec = codec; self.quality = quality; self.sizeBytes = sizeBytes
     }
 }
 
@@ -122,8 +128,8 @@ public enum SourceResolver {
             downloadURL: link,
             format: format,
             coverURL: track?.coverURL ?? "",
-            detail: "\(url.level) · \(url.br / 1000)kbps",
-            neteaseID: id)
+            detail: track?.album ?? "",
+            neteaseID: id, bitrate: url.br, quality: url.level, sizeBytes: url.sizeBytes)
     }
 
     // MARK: - B站
@@ -144,7 +150,8 @@ public enum SourceResolver {
     }
 
     public static func resolveBilibili(_ input: String, pageIndex: Int? = nil,
-                                       bili: BiliClient? = nil) async throws -> [PlayableItem] {
+                                       bili: BiliClient? = nil,
+                                       quality preference: BiliAudioQuality = .high) async throws -> [PlayableItem] {
         var headers = ["User-Agent": BiliClient.UA, "Referer": "https://www.bilibili.com/"]
         if let bili, bili.isLoggedIn {
             headers["Cookie"] = HTTPTask.cookieHeader(bili.cookies)
@@ -190,24 +197,19 @@ public enum SourceResolver {
             try Task.checkCancellation()
             if let requestedPage, index != requestedPage - 1 { continue }
             let play = try await httpGetJSON(
-                "https://api.bilibili.com/x/player/playurl?\(query)&cid=\(page.cid)&fnval=16&qn=64&try_look=1",
+                "https://api.bilibili.com/x/player/playurl?\(query)&cid=\(page.cid)&fnval=4048&fnver=0&qn=127&fourk=1",
                 headers: headers)
             guard let playData = play["data"] as? [String: Any] else { continue }
             var audioURL: String?
             var quality = ""
+            var bitrate = 0
+            var codec = ""
             if let dash = playData["dash"] as? [String: Any],
-               let audio = dash["audio"] as? [[String: Any]] {
-                // 按 id(码率档) 降序取最好音质: 30280=192k 30232=132k 30216=64k
-                let best = audio.sorted { ($0["id"] as? Int ?? 0) > ($1["id"] as? Int ?? 0) }.first
-                if let baseUrl = best?["baseUrl"] as? String, !baseUrl.isEmpty {
-                    audioURL = baseUrl
-                    switch best?["id"] as? Int {
-                    case 30280: quality = "192kbps"
-                    case 30232: quality = "132kbps"
-                    case 30216: quality = "64kbps"
-                    default: quality = ""
-                    }
-                }
+               let stream = biliAudio(in: dash, quality: preference) {
+                audioURL = stream.url
+                quality = stream.quality
+                bitrate = stream.bitrate
+                codec = stream.codec
             }
             if audioURL == nil, let durl = playData["durl"] as? [[String: Any]],
                let first = durl.first, let u = first["url"] as? String {
@@ -220,10 +222,11 @@ public enum SourceResolver {
                 artist: owner,
                 source: .bilibili,
                 downloadURL: audioURL,
-                format: quality == "mp4" ? "mp4" : "m4a",
+                format: codec.lowercased() == "flac" ? "flac" : (quality == "mp4" ? "mp4" : "m4a"),
                 headers: headers,
                 coverURL: pic,
-                detail: (page.part.isEmpty ? "" : page.part + " · ") + quality + " · DASH音频"))
+                detail: page.part,
+                bitrate: bitrate, codec: codec, quality: quality))
         }
         if items.isEmpty {
             throw NSError(domain: "Bili", code: 3,

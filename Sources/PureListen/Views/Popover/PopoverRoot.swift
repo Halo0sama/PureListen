@@ -146,15 +146,13 @@ struct PopoverTopBar: View {
 
             Spacer(minLength: 4)
 
-            // 搜索: 单独拎出来的一枚玻璃圆钮, 就在「窗口模式」左边。
             if router.route != .search {
                 DSGlassIconButton(systemName: "magnifyingglass", help: "搜索") {
                     router.openSearch()
                 }
             }
 
-            // 窗口模式: 保留原来的「打开独立播放窗口」功能。
-            DSGlassPillButton(title: "窗口模式", systemImage: "macwindow.on.rectangle") {
+            DSGlassIconButton(systemName: "macwindow.on.rectangle", help: "打开播放窗口") {
                 state.onOpenNowPlaying?()
             }
 
@@ -181,18 +179,21 @@ struct PopoverTopBar: View {
     private var subtitle: String? {
         switch router.route {
         case .home:
+            if router.tab == .bilibili {
+                return state.biliUname.isEmpty ? "哔哩哔哩" : "哔哩哔哩 · \(state.biliUname)"
+            }
             let name = state.profile?.nickname ?? ""
-            return name.isEmpty ? "纯净聆听" : "网易云 · \(name)"
+            return name.isEmpty ? "网易云" : "网易云 · \(name)"
         case .playlist:
             guard let playlist = state.currentPlaylist else { return nil }
             return "\(playlist.trackCount) 首 · 网易云歌单"
         case .search:
-            return "搜索歌曲 · 粘贴链接直达"
+            return nil
         case .nowPlaying:
             let artist = state.trackStatus.artist
             return artist.isEmpty ? state.currentSourceLabel : artist
         case .settings:
-            return "外观与播放偏好"
+            return nil
         }
     }
 }

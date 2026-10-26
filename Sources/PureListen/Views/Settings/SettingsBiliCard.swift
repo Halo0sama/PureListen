@@ -11,18 +11,16 @@ struct SettingsBiliCard: View {
     var metrics: SettingsMetrics
 
     var body: some View {
-        SettingsCard(metrics: metrics) {
-            Group {
-                switch state.biliPhase {
-                case .loggedIn:
-                    loggedInRow
-                case .qrWaiting, .qrScanned:
-                    scanning
-                case .failed(let message):
-                    failed(message)
-                case .idle:
-                    chooser
-                }
+        Group {
+            switch state.biliPhase {
+            case .loggedIn:
+                loggedInRow
+            case .qrWaiting, .qrScanned:
+                scanning
+            case .failed(let message):
+                failed(message)
+            case .idle:
+                chooser
             }
         }
         .animation(DS.Motion.standard, value: state.biliPhase)
@@ -31,10 +29,10 @@ struct SettingsBiliCard: View {
     // MARK: 已登录
 
     private var loggedInRow: some View {
-        SettingsRow(title: state.biliUname.isEmpty ? "已登录" : state.biliUname,
-                    subtitle: "哔哩哔哩账号 · 可播放收藏夹的音频流",
-                    metrics: metrics) {
-            SettingsSmallButton(title: "退出", systemImage: "rectangle.portrait.and.arrow.right") {
+        SettingsAccountRow(avatarURL: state.biliAvatarURL,
+                           name: state.biliUname.isEmpty ? "已登录" : state.biliUname,
+                           service: "哔哩哔哩", metrics: metrics) {
+            SettingsDangerButton(title: "退出登录", systemImage: "rectangle.portrait.and.arrow.right") {
                 state.logoutBili()
             }
         }
@@ -43,24 +41,16 @@ struct SettingsBiliCard: View {
     // MARK: 未登录: 两种登录方式
 
     private var chooser: some View {
-        VStack(alignment: .leading, spacing: DS.Space.m) {
-            HStack(spacing: DS.Space.m) {
-                DSPillButton(title: "网页登录", systemImage: "safari", prominent: true) {
+        SettingsAccountRow(avatarURL: "", name: "未登录", service: "哔哩哔哩", metrics: metrics) {
+            HStack(spacing: DS.Space.s) {
+                SettingsSmallButton(title: "网页登录", systemImage: "safari") {
                     state.onOpenBiliWebLogin?()
                 }
-                DSPillButton(title: "扫码登录", systemImage: "qrcode") {
+                SettingsSmallButton(title: "扫码", systemImage: "qrcode") {
                     state.startBiliLogin()
                 }
-                Spacer(minLength: 0)
             }
-            Text("登录后可播放收藏夹视频的音频流，自动取最高码率。")
-                .font(metrics.subtitleFont)
-                .foregroundStyle(DS.Palette.textTertiary)
-                .fixedSize(horizontal: false, vertical: true)
-                .lineSpacing(1.5)
         }
-        .padding(.horizontal, metrics.rowHorizontalPadding)
-        .padding(.vertical, metrics.rowVerticalPadding)
     }
 
     // MARK: 扫码中

@@ -60,7 +60,7 @@ enum UIPreviewStudio {
             for scheme in schemes {
                 NSApp.appearance = NSAppearance(named: scheme.appearanceName)
                 for scene in UIPreviewCatalog.scenes() {
-                    if let only, !scene.name.contains(only) { continue }
+                    if let only, !only.split(separator: ",").contains(where: { scene.name.contains($0) }) { continue }
                     index += 1
                     await render(scene: scene, scheme: scheme, into: outputURL)
                 }

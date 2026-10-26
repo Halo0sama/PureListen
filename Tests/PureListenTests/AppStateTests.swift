@@ -34,6 +34,19 @@ final class AppStateTests: XCTestCase {
         XCTAssertTrue(state.devices.isEmpty)
     }
 
+    func testBiliQualityPersistsIndependentlyAndMuteStaysUnchanged() {
+        let (state, defaults, suite) = makeState(["volume": 0.0])
+        defer { state.shutdown(); defaults.removePersistentDomain(forName: suite) }
+        XCTAssertEqual(state.biliQuality, .high)
+        state.level = .lossless
+        state.biliQuality = .hires
+        let restored = AppState(defaults: defaults, previewMode: true)
+        defer { restored.shutdown() }
+        XCTAssertEqual(restored.biliQuality, .hires)
+        XCTAssertEqual(restored.level, .lossless)
+        XCTAssertEqual(restored.volume, 0)
+    }
+
     func testLatestPlaybackWinsEvenWhenOldRequestIgnoresCancellation() async throws {
         let (state, defaults, suite) = makeState()
         defer { state.shutdown(); defaults.removePersistentDomain(forName: suite) }

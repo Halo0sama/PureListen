@@ -35,6 +35,7 @@ struct PopoverHome: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .animation(DS.Motion.page, value: router.tab)
             .onChange(of: router.tab) { _, tab in
                 // 兜底：没有经过 hover 的切换路径也能保证页面已创建。
                 loadedTabs.insert(tab)
@@ -85,6 +86,7 @@ private struct PlaylistPane: View {
             }
             .contentMargins(.bottom, 132, for: .scrollContent)
             .scrollEdgeEffectStyle(.soft, for: .top)
+            .dsScrollFade(top: 38)
         }
         .padding(.horizontal, DS.Space.popoverPadding - DS.Space.s)
     }
@@ -96,15 +98,19 @@ private struct BiliPane: View {
     @EnvironmentObject var state: AppState
 
     var body: some View {
-        Group {
+        ZStack {
             if state.biliPhase != .loggedIn {
                 notLoggedIn
             } else if let folder = state.currentFavFolder {
                 videos(folder)
+                    .id(folder.id)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
             } else {
                 folders
+                    .transition(.move(edge: .leading).combined(with: .opacity))
             }
         }
+        .animation(DS.Motion.page, value: state.currentFavFolder?.id)
         .padding(.horizontal, DS.Space.popoverPadding)
     }
 
@@ -120,13 +126,13 @@ private struct BiliPane: View {
                     .font(DS.TypeScale.body)
                     .fontWeight(.medium)
                     .foregroundStyle(DS.Palette.textPrimary)
-                Text("登录后可直接播放收藏夹音频, 自动取最高码率")
+                Text("登录后同步收藏夹")
                     .font(DS.TypeScale.caption)
                     .foregroundStyle(DS.Palette.textSecondary)
                     .multilineTextAlignment(.center)
             }
             VStack(spacing: DS.Space.s) {
-                DSPillButton(title: "网页登录(推荐)", systemImage: "safari", prominent: true) {
+                DSPillButton(title: "网页登录", systemImage: "safari", prominent: true) {
                     state.onOpenBiliWebLogin?()
                 }
                 DSPillButton(title: "扫码登录") {
@@ -152,17 +158,23 @@ private struct BiliPane: View {
                               subtitle: "\(folder.mediaCount) 个视频", height: 44) {
                         Task { await state.openFavFolder(folder) }
                     } leading: {
-                        DSGlyphTile(systemName: "folder.fill", tint: Color(hex: 0xFB7299), size: 28)
+                        if folder.cover.isEmpty {
+                            DSGlyphTile(systemName: "folder.fill", tint: Color(hex: 0xFB7299), size: 34)
+                        } else {
+                            CoverArtwork(url: folder.cover, size: 34, radius: DS.Radius.artSmall)
+                        }
                     } trailing: {
                         Image(systemName: "chevron.right")
                             .font(.system(size: 9, weight: .semibold))
                             .foregroundStyle(DS.Palette.textQuaternary)
                     }
+                    .task(id: folder.id) { await state.loadFolderCover(folder) }
                 }
             }
         }
         .contentMargins(.bottom, 132, for: .scrollContent)
         .scrollEdgeEffectStyle(.soft, for: .top)
+            .dsScrollFade(top: 38)
         .task {
             if state.favFolders.isEmpty { await state.loadFavFolders() }
         }
@@ -172,8 +184,10 @@ private struct BiliPane: View {
         VStack(spacing: DS.Space.s) {
             HStack {
                 DSIconButton(systemName: "chevron.left", size: 22, iconSize: 10, help: "返回") {
-                    state.currentFavFolder = nil
-                    state.favVideos = []
+                    withAnimation(DS.Motion.page) {
+                        state.currentFavFolder = nil
+                        state.favVideos = []
+                    }
                 }
                 Text(folder.title)
                     .font(DS.TypeScale.caption)
@@ -208,6 +222,7 @@ private struct BiliPane: View {
                 }
             }
             .contentMargins(.bottom, 132, for: .scrollContent)
+            .dsScrollFade(top: 38)
         }
     }
 }
@@ -257,6 +272,7 @@ struct PopoverTrackList: View {
         }
         .contentMargins(.bottom, 132, for: .scrollContent)
         .scrollEdgeEffectStyle(.soft, for: .top)
+            .dsScrollFade(top: 38)
     }
 
     @ViewBuilder

@@ -270,8 +270,7 @@ struct DSSegmented<Item: Hashable>: View {
                 let isSelected = item == selection
                 Button {
                     guard !isSelected else { return }
-                    // 只让选中胶囊自己动画，内容切换不加动画（避免整页布局动画造成掉帧）。
-                    selection = item
+                    withAnimation(DS.Motion.page) { selection = item }
                 } label: {
                     Text(title(item))
                         .font(.system(size: 11.5, weight: isSelected ? .semibold : .medium))
@@ -337,13 +336,13 @@ struct DSSegmented<Item: Hashable>: View {
                 .position(x: m.selectedX, y: size.height / 2)
                 .allowsHitTesting(false)
         } else {
-            // 按下时整枚透镜胶囊整体放大（宽高同比），而不是左右拉伸。
+            // 上下与左右均可伸出轨道 8pt。
             let lensScale: CGFloat = isPressed ? 1.40 : 1
+            let overhang: CGFloat = 8
             let pressedX: CGFloat = {
                 guard isPressed, let point = activePoint else { return m.selectedX }
                 // 放大后的透镜允许越出轨道边缘一点（官方那种"出框"感），但不要越出弹窗。
                 let half = m.pillWidth * lensScale / 2
-                let overhang: CGFloat = 8
                 let lower = max(half - overhang, 0)
                 let upper = min(size.width - half + overhang, size.width)
                 return min(max(point.x, lower), upper)
@@ -366,8 +365,8 @@ struct DSSegmented<Item: Hashable>: View {
                                                      startPoint: .top, endPoint: .bottom),
                                 lineWidth: isPressed ? 1.2 : 0.8)
                     }
-                    .frame(width: m.pillWidth, height: pillHeight)
-                    .scaleEffect(lensScale)
+                    .frame(width: m.pillWidth * lensScale,
+                           height: isPressed ? height + overhang * 2 : pillHeight)
                     .shadow(color: .black.opacity(isDark ? (isPressed ? 0.40 : 0.30)
                                                         : (isPressed ? 0.20 : 0.12)),
                             radius: isPressed ? 10 : 3,
@@ -389,7 +388,7 @@ struct DSSegmented<Item: Hashable>: View {
         let clamped = min(max(raw, 0), items.count - 1)
         let target = items[clamped]
         guard target != selection else { return }
-        selection = target
+        withAnimation(DS.Motion.page) { selection = target }
     }
 }
 

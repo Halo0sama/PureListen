@@ -144,11 +144,11 @@ enum DS {
         )
         static let textTertiary = Color.dynamic(
             light: NSColor(srgbRed: 0.09, green: 0.09, blue: 0.10, alpha: 0.47),
-            dark: NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.47)
+            dark: NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.60)
         )
         static let textQuaternary = Color.dynamic(
             light: NSColor(srgbRed: 0.09, green: 0.09, blue: 0.10, alpha: 0.24),
-            dark: NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.24)
+            dark: NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.42)
         )
         /// 成功 / 位完美。
         static let mint = Color.dynamic(
@@ -431,5 +431,31 @@ extension View {
             .tracking(DS.Tracking.micro)
             .textCase(.uppercase)
             .foregroundStyle(color)
+    }
+}
+
+struct ScrollContentFade: ViewModifier {
+    var top: CGFloat = 24
+    var bottom: CGFloat = 0
+    func body(content: Content) -> some View {
+        content.mask {
+            VStack(spacing: 0) {
+                if top > 0 {
+                    LinearGradient(colors: [.clear, .white], startPoint: .top, endPoint: .bottom)
+                        .frame(height: top)
+                }
+                Color.white
+                if bottom > 0 {
+                    LinearGradient(colors: [.white, .clear], startPoint: .top, endPoint: .bottom)
+                        .frame(height: bottom)
+                }
+            }
+        }
+    }
+}
+
+extension View {
+    func dsScrollFade(top: CGFloat = 24, bottom: CGFloat = 0) -> some View {
+        modifier(ScrollContentFade(top: top, bottom: bottom))
     }
 }

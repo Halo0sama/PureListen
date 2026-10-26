@@ -10,22 +10,35 @@ final class VolumeMirror {
     }
 
     var onSystemVolume: ((Float) -> Void)?
+    var fallbackDevice: (() -> SystemOutput.Identity?)?
     private var timer: Timer?
     private var lastSnapshot: Snapshot?
     private var settlingUntil = Date.distantPast
     private let pollInterval: TimeInterval
-    private let readSnapshot: () -> Snapshot?
+    private let readSnapshotOverride: (() -> Snapshot?)?
     private let now: () -> Date
 
     init(pollInterval: TimeInterval = 0.4,
-         readSnapshot: @escaping () -> Snapshot? = {
-             guard let device = SystemOutput.defaultOutputIdentity(),
-                   let value = SystemOutput.volume(on: device.id) else { return nil }
-             return Snapshot(deviceID: device.id, uid: device.uid, volume: value)
-         }, now: @escaping () -> Date = Date.init) {
+         readSnapshot: (() -> Snapshot?)? = nil, now: @escaping () -> Date = Date.init) {
         self.pollInterval = pollInterval
-        self.readSnapshot = readSnapshot
+        self.readSnapshotOverride = readSnapshot
         self.now = now
+    }
+
+    private func readSnapshot() -> Snapshot? {
+        if let readSnapshotOverride { return readSnapshotOverride() }
+        // 独占所有输出时，CoreAudio 的默认输出可能暂时为 0。
+        return Self.snapshot(defaultDevice: SystemOutput.defaultOutputIdentity(),
+                             fallbackDevice: fallbackDevice?(), volume: SystemOutput.volume(on:))
+    }
+
+    static func snapshot(defaultDevice: SystemOutput.Identity?, fallbackDevice: SystemOutput.Identity?,
+                         volume: (UInt32) -> Float?) -> Snapshot? {
+        for device in [defaultDevice, fallbackDevice].compactMap({ $0 }) {
+            guard let value = volume(device.id), value.isFinite, (0...1).contains(value) else { continue }
+            return Snapshot(deviceID: device.id, uid: device.uid, volume: value)
+        }
+        return nil
     }
 
     func start() {

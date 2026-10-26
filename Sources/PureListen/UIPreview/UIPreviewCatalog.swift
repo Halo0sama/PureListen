@@ -66,6 +66,26 @@ enum UIPreviewCatalog {
             makeView: { AnyView(ContentView(initialTab: .bilibili)) }
         ))
 
+        scenes.append(.init(name: "refinement-neutral-tracks", presentation: .popover(size: popoverSize),
+                            configure: { state in state.currentIndex = -1 },
+                            makeView: { AnyView(ContentView(initialRoute: .playlist)) }))
+        scenes.append(.init(name: "refinement-bili-folders", presentation: .popover(size: popoverSize),
+                            configure: { state in
+                                state.biliPhase = .loggedIn
+                                state.favFolders = state.favFolders.enumerated().map { index, folder in
+                                    var folder = folder; folder.cover = "preview://cover/\(index)"; return folder
+                                }
+                            }, makeView: { AnyView(ContentView(initialTab: .bilibili)) }))
+        scenes.append(.init(name: "refinement-bili-videos", presentation: .popover(size: popoverSize),
+                            configure: { state in
+                                state.biliPhase = .loggedIn
+                                state.currentFavFolder = state.favFolders.first
+                            }, makeView: { AnyView(ContentView(initialTab: .bilibili)) }))
+        scenes.append(.init(name: "refinement-home-pressed", presentation: .popover(size: popoverSize),
+                            configure: { _ in }, makeView: {
+                                AnyView(ContentView().environment(\.glassLensDebugPoint, CGPoint(x: 70, y: 15)))
+                            }))
+
         // MARK: 统一搜索页(空状态 / 已有关键词与结果 / 链接直达)
 
         scenes.append(.init(
@@ -256,15 +276,14 @@ private struct GlassLensPreview: View {
                     .foregroundStyle(DS.Palette.textTertiary)
 
                 DSSegmented(items: [0, 1],
-                            title: { ["歌单", "B站"][$0] },
+                            title: { ["网易云", "哔哩哔哩"][$0] },
                             selection: $tab, height: 30)
                     .environment(\.glassLensDebugPoint, CGPoint(x: 86, y: 15))
 
                 HStack(spacing: 9) {
                     DSGlassIconButton(systemName: "magnifyingglass", help: "搜索") {}
                         .environment(\.glassLensDebugPoint, CGPoint(x: 20, y: 19))
-                    DSGlassPillButton(title: "窗口模式",
-                                      systemImage: "macwindow.on.rectangle") {}
+                    DSGlassIconButton(systemName: "macwindow.on.rectangle", help: "打开播放窗口") {}
                         .environment(\.glassLensDebugPoint, CGPoint(x: 58, y: 19))
                     Spacer(minLength: 0)
                 }

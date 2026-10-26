@@ -28,13 +28,12 @@ struct SettingsView: View {
         ScrollViewReader { proxy in
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: metrics.sectionSpacing) {
+                    accountsSection.id("settings-account")
                     qualitySection.id("settings-quality")
                     networkSection.id("settings-network")
                     outputSection.id("settings-output")
                     protectionSection.id("settings-protection")
-                    biliSection.id("settings-bili")
                     cacheSection.id("settings-cache")
-                    accountSection.id("settings-account")
                     aboutSection.id("settings-about")
                 }
                 .frame(maxWidth: metrics.cardMaxWidth ?? .infinity, alignment: .leading)
@@ -45,6 +44,7 @@ struct SettingsView: View {
             }
             .scrollEdgeEffectStyle(.soft, for: .top)
             .scrollEdgeEffectStyle(.soft, for: .bottom)
+            .dsScrollFade(top: 24, bottom: layout == .window ? 24 : 0)
             .onAppear { scrollToPreviewTarget(proxy) }
             .onChange(of: previewScrollTarget) { _, _ in scrollToPreviewTarget(proxy) }
         }
@@ -64,37 +64,26 @@ struct SettingsView: View {
 
     private var qualitySection: some View {
         SettingsSection(title: "音质",
-                        trailing: AnyView(qualityChip),
                         metrics: metrics) {
             VStack(alignment: .leading, spacing: DS.Space.m) {
+                Text("网易云").font(metrics.subtitleFont).foregroundStyle(DS.Palette.textSecondary)
                 DSSegmented(items: Self.qualityOrder,
                             title: shortQualityTitle,
                             selection: qualityBinding,
                             height: metrics.segmentedHeight)
-                Text(qualityNote)
-                    .font(metrics.subtitleFont)
-                    .foregroundStyle(DS.Palette.textSecondary)
-                    .lineSpacing(1.5)
-                    .fixedSize(horizontal: false, vertical: true)
+                Text("哔哩哔哩").font(metrics.subtitleFont).foregroundStyle(DS.Palette.textSecondary)
+                    .padding(.top, 6)
+                DSSegmented(items: BiliAudioQuality.allCases,
+                            title: { $0.label }, selection: $state.biliQuality,
+                            height: metrics.segmentedHeight)
+                Text("新播放生效；Hi-Res 需音源及账号支持。")
+                    .font(metrics.subtitleFont).foregroundStyle(DS.Palette.textSecondary)
+
             }
             .padding(.horizontal, metrics.rowHorizontalPadding)
             .padding(.top, DS.Space.xs)
             .padding(.bottom, metrics.rowVerticalPadding)
         }
-    }
-
-    /// 当前音质: 全页唯一一处品牌色, 让"选中"这件事一眼可见。
-    private var qualityChip: some View {
-        Text(state.level.label)
-            .font(.system(size: 9.5, weight: .semibold))
-            .tracking(0.2)
-            .foregroundStyle(DS.Palette.brandAccent)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 2.5)
-            .background {
-                Capsule(style: .continuous)
-                    .fill(DS.Palette.brandAccent.opacity(0.14))
-            }
     }
 
     private var qualityBinding: Binding<NCLevel> {
@@ -110,22 +99,9 @@ struct SettingsView: View {
         }
     }
 
-    private var qualityNote: String {
-        switch state.level {
-        case .hires:
-            return "优先请求 Hi-Res 母带；内置 3.5mm 孔最高 96kHz，192kHz 母带会自动降采样。"
-        case .lossless:
-            return "优先无损 FLAC，按音源原始采样率独占输出，不经过系统混音器。"
-        case .exhigh:
-            return "320kbps 有损音源，网络受限时使用。"
-        case .standard:
-            return "128kbps 有损音源，仅在网络极差时使用。"
-        }
-    }
-
     private var networkSection: some View {
         SettingsSection(title: "网络", metrics: metrics) {
-            SettingsRow(title: "连接方式", subtitle: "国内服务默认直连；更改后对新请求生效", metrics: metrics) {
+            SettingsRow(title: "连接方式", metrics: metrics) {
                 Picker("连接方式", selection: $state.networkMode) {
                     ForEach(NetworkMode.allCases, id: \.self) { mode in
                         Text(mode.label).tag(mode)
@@ -161,7 +137,6 @@ struct SettingsView: View {
             }
             SettingsRowDivider(metrics: metrics)
             SettingsRow(title: "启动时自动继续上次歌单",
-                        subtitle: "打开净听后接着播放上次的歌单",
                         metrics: metrics) {
                 SettingsToggle(isOn: $state.autoResume)
             }
@@ -208,7 +183,6 @@ struct SettingsView: View {
             }
             SettingsRowDivider(metrics: metrics)
             SettingsRow(title: "接管媒体键",
-                        subtitle: "播放/暂停与上一首、下一首由净听响应",
                         metrics: metrics) {
                 SettingsToggle(isOn: $state.mediaControlKeysEnabled)
             }
@@ -226,7 +200,7 @@ struct SettingsView: View {
     }
 
     private var showsMediaKeyWarning: Bool {
-        guard state.mediaControlKeysEnabled else { return false }
+        guard state.mediaControlKeysEnabled || state.systemVolumeMirror else { return false }
         return forceMediaKeyWarning || !MediaKeyTap.hasPermission()
     }
 
@@ -254,33 +228,11 @@ struct SettingsView: View {
         NSWorkspace.shared.open(url)
     }
 
-    // MARK: - 哔哩哔哩
-
-    private var biliSection: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            SettingsSectionHeader(title: "哔哩哔哩账号",
-                                  detail: biliStateText,
-                                  live: state.biliPhase == .loggedIn,
-                                  metrics: metrics)
-            SettingsBiliCard(metrics: metrics)
-        }
-    }
-
-    private var biliStateText: String {
-        switch state.biliPhase {
-        case .loggedIn: return "已登录"
-        case .qrWaiting, .qrScanned: return "扫码中"
-        case .failed: return "登录失败"
-        case .idle: return "未登录"
-        }
-    }
-
     // MARK: - 缓存
 
     private var cacheSection: some View {
         SettingsSection(title: "缓存", detail: state.cacheSizeText, metrics: metrics) {
             SettingsRow(title: "已下载歌曲",
-                        subtitle: "清除后再次播放会重新下载无损音源",
                         metrics: metrics) {
                 SettingsSmallButton(title: "清除", systemImage: "trash") {
                     state.clearCache()
@@ -289,92 +241,35 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - 网易云账号
-
-    private var accountSection: some View {
-        SettingsSection(title: "网易云账号",
-                        detail: state.profile == nil ? "未登录" : "已登录",
-                        live: state.profile != nil,
-                        metrics: metrics) {
-            HStack(spacing: metrics.controlSpacing) {
-                profileAvatar
-                VStack(alignment: .leading, spacing: metrics.rowSpacing) {
-                    Text(state.profile?.nickname ?? "未登录")
-                        .font(metrics.titleFont)
-                        .foregroundStyle(DS.Palette.textPrimary)
-                    Text(accountSubtitle)
-                        .font(metrics.subtitleFont)
-                        .foregroundStyle(DS.Palette.textSecondary)
-                }
-                Spacer(minLength: DS.Space.m)
+    private var accountsSection: some View {
+        SettingsSection(title: "账号", metrics: metrics) {
+            SettingsAccountRow(avatarURL: state.profile?.avatarUrl ?? "",
+                               name: state.profile?.nickname ?? "未登录",
+                               service: "网易云", metrics: metrics) {
                 if state.profile != nil {
-                    SettingsDangerButton(title: "退出登录",
-                                         systemImage: "rectangle.portrait.and.arrow.right") {
+                    SettingsDangerButton(title: "退出登录", systemImage: "rectangle.portrait.and.arrow.right") {
                         state.logout()
                     }
                 }
             }
-            .padding(.horizontal, metrics.rowHorizontalPadding)
-            .padding(.vertical, metrics.rowVerticalPadding)
+            SettingsRowDivider(metrics: metrics)
+            SettingsBiliCard(metrics: metrics).id("settings-bili")
         }
-    }
-
-    @ViewBuilder
-    private var profileAvatar: some View {
-        if let profile = state.profile, !profile.avatarUrl.isEmpty {
-            CoverArtwork(url: profile.avatarUrl, size: 32, radius: DS.Radius.artSmall,
-                         borderOpacity: 0.14)
-        } else {
-            ZStack {
-                RoundedRectangle(cornerRadius: DS.Radius.artSmall, style: .continuous)
-                    .fill(DS.Palette.surfaceSelected)
-                Image(systemName: "person.fill")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(DS.Palette.textTertiary)
-            }
-            .frame(width: 32, height: 32)
-        }
-    }
-
-    private var accountSubtitle: String {
-        guard let profile = state.profile else { return "扫码登录后即可拉取歌单" }
-        return "UID \(profile.userId) · 歌单已同步"
     }
 
     // MARK: - 关于 / 退出
 
     private var aboutSection: some View {
         VStack(alignment: .leading, spacing: DS.Space.xl) {
-            VStack(alignment: .leading, spacing: DS.Space.s) {
-                Text("关于")
-                    .font(metrics.headerFont)
-                    .foregroundStyle(DS.Palette.textSecondary)
-                    .padding(.horizontal, DS.Space.xs)
-                Text("净听以 hog mode 独占输出设备并自动切换采样率，绕过系统混音器消除 SRC；播放期间其他 App 的声音会被暂时屏蔽。")
-                    .font(metrics.bodyFont)
-                    .foregroundStyle(DS.Palette.textSecondary)
-                    .lineSpacing(2)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
             SettingsSection(title: "退出", metrics: metrics) {
                 SettingsRow(title: "退出净听",
-                            subtitle: "释放独占输出并关闭应用",
                             metrics: metrics) {
                     SettingsSmallButton(title: "退出", systemImage: "power") {
                         NSApp.terminate(nil)
                     }
                 }
             }
-            HStack(spacing: DS.Space.xs) {
-                Spacer(minLength: 0)
-                Text("Bit-perfect · 本地播放 · 无广告")
-                    .font(DS.TypeScale.micro)
-                    .tracking(DS.Tracking.micro)
-                    .textCase(.uppercase)
-                    .foregroundStyle(DS.Palette.textQuaternary)
-                Spacer(minLength: 0)
-            }
+
         }
     }
 }

@@ -151,6 +151,7 @@ struct PopoverSearchPage: View {
         }
         .contentMargins(.bottom, 132, for: .scrollContent)
         .scrollEdgeEffectStyle(.soft, for: .top)
+            .dsScrollFade(top: 24)
         .padding(.horizontal, DS.Space.popoverPadding - DS.Space.s)
     }
 

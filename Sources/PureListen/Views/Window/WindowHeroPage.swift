@@ -54,11 +54,6 @@ struct WindowHeroPage: View {
         WindowFormatting.levelShort(state.trackStatus.level, fallback: state.level)
     }
 
-    private var specText: String {
-        WindowFormatting.spec(rate: state.trackStatus.fileRate,
-                              bits: state.trackStatus.fileBits)
-    }
-
     private var formatText: String {
         state.trackStatus.format.uppercased()
     }
@@ -158,8 +153,11 @@ struct WindowHeroPage: View {
     private var chips: some View {
         HStack(spacing: DS.Space.s) {
             DSChip(text: levelLabel)
-            if specText != "—" {
-                DSChip(text: specText)
+            if state.trackStatus.fileRate > 0 {
+                DSChip(text: WindowFormatting.rate(state.trackStatus.fileRate))
+            }
+            if state.trackStatus.fileBits > 0 {
+                DSChip(text: "\(state.trackStatus.fileBits) bit")
             }
             if !formatText.isEmpty {
                 DSChip(text: formatText)

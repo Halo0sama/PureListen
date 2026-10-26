@@ -9,8 +9,8 @@ enum PopoverTab: Hashable, CaseIterable {
 
     var title: String {
         switch self {
-        case .playlists: return "歌单"
-        case .bilibili: return "B站"
+        case .playlists: return "网易云"
+        case .bilibili: return "哔哩哔哩"
         }
     }
 }
