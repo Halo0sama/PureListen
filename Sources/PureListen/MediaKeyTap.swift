@@ -104,20 +104,3 @@ final class MediaKeyTap {
         }
     }
 }
-
-/// 系统静音控制（用设备的 mute 属性而非音量归零：百分比保留，音量联动不受影响）。
-///
-/// 直接读写 CoreAudio（`SystemOutput`），不再使用 AppleScript —— 后者会触发
-/// 「自动化 / 设备控制和数据访问」授权，ad-hoc 签名下无法保持，导致反复弹窗。
-enum SystemMute {
-    static func setMuted(_ muted: Bool) {
-        let applied = SystemOutput.setMuted(muted)
-        if !applied {
-            NCLog.log("[静音] ⚠ 无法设置系统静音(设备不支持 mute 属性?)")
-        }
-    }
-
-    static func isMuted() -> Bool {
-        SystemOutput.isMuted() ?? false
-    }
-}

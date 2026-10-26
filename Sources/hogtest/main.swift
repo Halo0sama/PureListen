@@ -113,7 +113,29 @@ if arguments.count > 3, arguments[1] == "verify-silent" {
     print("decodedSamples=\(decoded.count) finiteInRange=\(decodeValid) nonzero=\(decodeNonzero)")
     print("outputSamples=\(output.count) allZero=\(outputSilent) clamped=\(clamped)")
     print("finished=\(finished) rateRestored=\(restored)")
-    let passed = ok && decodeValid && decodeNonzero && outputSilent && clamped == 0 && restored
+    var passed = ok && decodeValid && decodeNonzero && outputSilent && clamped == 0 && restored
+    if arguments.count > 4, let secondID = UInt32(arguments[4]),
+       let second = AudioDevice.allDevices().first(where: { $0.id == secondID }), secondID != id {
+        let secondRate = AudioDevice.nominalSampleRate(secondID)
+        // 用零增益在两个真实输出间往返，核对旧 IO、采样率和独占均归还原设备。
+        for target in [secondID, id, secondID] {
+            let previous = target == id ? secondID : id
+            player.deviceID = previous
+            player.playFile(url: URL(fileURLWithPath: path), metadata: metadata)
+            pump(0.08)
+            player.deviceID = target
+            player.playFile(url: URL(fileURLWithPath: path), metadata: metadata)
+            pump(0.15)
+            let started = player.state == .playing && AudioDevice.hogOwner(target) == getpid()
+                && AudioDevice.hogOwner(previous) != getpid()
+            player.shutdown()
+            let silent = !player.ioDump.isEmpty && player.ioDump.allSatisfy { $0 == 0 }
+            let released = AudioDevice.hogOwner(id) != getpid() && AudioDevice.hogOwner(secondID) != getpid()
+            let rates = AudioDevice.nominalSampleRate(id) == originalRate && AudioDevice.nominalSampleRate(secondID) == secondRate
+            passed = passed && started && silent && released && rates
+            print("switchTarget=\(target) secondDevice=\(second.name) silent=\(silent) hogsReleased=\(released) ratesRestored=\(rates)")
+        }
+    }
     print(passed ? "PASS: 静音硬件链路验证通过" : "FAIL: 静音硬件链路验证失败")
     exit(passed ? 0 : 1)
 }

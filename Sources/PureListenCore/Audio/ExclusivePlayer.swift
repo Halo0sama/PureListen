@@ -51,7 +51,7 @@ public final class ExclusivePlayer {
     private var decodeDumpCount = 0
     private var ioDumpCount = 0
     private let ioDumpMaxFrames = 96000 * 3
-    public var volume: Float = 1.0 {
+    public var volume: Float = 0.1 {
         didSet { volume = volume.isFinite ? min(max(volume, 0), 1) : 0 }
     }
     /// 音量 1.0 时位完美(不做任何乘法)。
@@ -133,6 +133,8 @@ public final class ExclusivePlayer {
     private var reachedEOF = false
     private var finishNotified = false
     private var generation = UUID()
+    /// 供控制层丢弃停止/换设备之前已排队的回调。
+    public var playbackID: UUID { generation }
 
     public init() {}
 
@@ -177,7 +179,7 @@ public final class ExclusivePlayer {
         AudioDeviceDestroyIOProcID(activeDeviceID, ioProcID)
         self.ioProcID = nil
         restoreOriginalRate()
-        AudioDevice.releaseHog(activeDeviceID)
+        if activeDeviceExists { AudioDevice.releaseHog(activeDeviceID) }
         releaseOtherOutputs()
         state = .paused
     }
@@ -530,8 +532,10 @@ public final class ExclusivePlayer {
         generation = UUID()
         stopDecode.store(true, ordering: .releasing)
         if let ioProcID {
-            AudioDeviceStop(activeDeviceID, ioProcID)
-            AudioDeviceDestroyIOProcID(activeDeviceID, ioProcID)
+            if activeDeviceExists {
+                AudioDeviceStop(activeDeviceID, ioProcID)
+                AudioDeviceDestroyIOProcID(activeDeviceID, ioProcID)
+            }
             self.ioProcID = nil
         }
         // 解码线程退出后才释放文件和环形缓冲，不在超时后释放仍被使用的内存。

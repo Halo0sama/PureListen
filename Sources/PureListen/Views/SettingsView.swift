@@ -169,8 +169,8 @@ struct SettingsView: View {
     }
 
     private var deviceSubtitle: String {
-        if state.autoDevice { return "自动跟随耳机插拔切换" }
-        guard let device = state.selectedDevice else { return "手动指定输出设备" }
+        if state.autoDevice { return "优先外置输出；切换后暂停，点击播放继续" }
+        guard let device = state.selectedDevice else { return "指定设备离线，连接后点击播放" }
         let rate = device.currentRate > 0
             ? String(format: " · %.1fkHz", device.currentRate / 1000)
             : ""
@@ -217,7 +217,7 @@ struct SettingsView: View {
             }
             SettingsRowDivider(metrics: metrics)
             SettingsRow(title: "系统音量联动",
-                        subtitle: "系统音量键与滑块同步为净听音量",
+                        subtitle: "同一设备上的调节同步；插拔后音量最多 10%",
                         metrics: metrics) {
                 SettingsToggle(isOn: $state.systemVolumeMirror)
             }

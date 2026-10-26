@@ -89,6 +89,8 @@ public enum AudioDevice {
     }
 
     public static func deviceInfo(_ id: AudioDeviceID) -> AudioDeviceInfo? {
+        let alive: UInt32? = getPropertyData(id, kAudioDevicePropertyDeviceIsAlive)
+        guard alive == 1 else { return nil }
         // 输出通道数
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyStreams,
@@ -133,23 +135,28 @@ public enum AudioDevice {
         return deviceInfo(id)
     }
 
-    /// 优先选择内置 3.5mm 耳机孔(插入耳机时出现的"外置耳机"设备), 其次内置扬声器。
     /// 按 ID 反查设备 UID(用于身份校验: 拔出后 ID 可能被回收复用)。
     public static func uid(for id: AudioDeviceID) -> String? {
         getString(id, kAudioDevicePropertyDeviceUID)
     }
 
     public static func preferredOutput() -> AudioDeviceInfo? {
-        let devices = allDevices()
-        let jack = devices.first {
-            $0.isBuiltIn && ($0.name.contains("外置耳机") || $0.name.lowercased().contains("external headphone"))
-        }
-        if let jack { return jack }
-        let builtin = devices.filter { $0.isBuiltIn }
-        if let speakers = builtin.first(where: { $0.name.contains("扬声器") || $0.name.lowercased().contains("speaker") }) {
-            return speakers
-        }
-        return builtin.first ?? defaultOutputDevice()
+        preferredOutput(in: allDevices(), defaultID: defaultOutputDevice()?.id)
+    }
+
+    /// 同一快照内优先外置输出、耳机孔、扬声器；独占引起的系统默认输出变化不改变选择。
+    public static func preferredOutput(in devices: [AudioDeviceInfo], defaultID: AudioDeviceID?, preferredUID: String? = nil) -> AudioDeviceInfo? {
+        let outputs = devices.filter(\.hasOutput)
+        let external = outputs.filter { !$0.isBuiltIn }
+        if let device = external.first(where: { $0.uid == preferredUID })
+            ?? external.first(where: { $0.id == defaultID }) ?? external.first { return device }
+        if let jack = outputs.first(where: {
+            $0.name.contains("外置耳机") || $0.name.lowercased().contains("headphone")
+        }) { return jack }
+        if let speakers = outputs.first(where: {
+            $0.name.contains("扬声器") || $0.name.lowercased().contains("speaker")
+        }) { return speakers }
+        return outputs.first(where: { $0.id == defaultID }) ?? outputs.first
     }
 
     // MARK: - Hog Mode(独占)
@@ -203,31 +210,63 @@ public enum AudioDevice {
         getPropertyData(device, kAudioDevicePropertyNominalSampleRate) ?? 0
     }
 
-    private final class ListenerBox {
-        let handler: () -> Void
-        init(_ handler: @escaping () -> Void) { self.handler = handler }
-    }
+    /// 可撤销的主队列监听：列表变化，以及设备先失效、后从列表移除的阶段。
+    public final class HotplugListener {
+        private struct Registration {
+            let object: AudioObjectID
+            var address: AudioObjectPropertyAddress
+            let block: AudioObjectPropertyListenerBlock
+        }
+        private var registrations: [Registration] = []
+        private let handler: (AudioDeviceID?) -> Void
+        private var stopped = false
 
-    /// 监听音频设备列表/默认输出变化(插拔耳机等)。返回是否成功。
-    @discardableResult
-    public static func startDeviceHotplugListener(_ handler: @escaping () -> Void) -> Bool {
-        let box = ListenerBox(handler)
-        listeners.append(box)
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDevices,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain)
-        let status = AudioObjectAddPropertyListener(AudioObjectID(kAudioObjectSystemObject), &address,
-            { _, _, _, client in
-                guard let client else { return noErr }
-                let box = Unmanaged<ListenerBox>.fromOpaque(client).takeUnretainedValue()
-                box.handler()
-                return noErr
-            }, Unmanaged.passUnretained(box).toOpaque())
-        return status == noErr
-    }
+        public init(_ handler: @escaping (AudioDeviceID?) -> Void) {
+            self.handler = handler
+            observe(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDevices)
+            observeDevices()
+        }
 
-    private static var listeners: [ListenerBox] = []
+        private func observe(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector,
+                             scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal) {
+            var address = AudioObjectPropertyAddress(mSelector: selector, mScope: scope,
+                                                     mElement: kAudioObjectPropertyElementMain)
+            guard AudioObjectHasProperty(object, &address) else { return }
+            let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+                guard let self, !self.stopped else { return }
+                if object == AudioObjectID(kAudioObjectSystemObject) { self.observeDevices() }
+                self.handler(object == AudioObjectID(kAudioObjectSystemObject) ? nil : object)
+            }
+            if AudioObjectAddPropertyListenerBlock(object, &address, .main, block) == noErr {
+                registrations.append(Registration(object: object, address: address, block: block))
+            }
+        }
+
+        private func observeDevices() {
+            let current = Set(AudioDevice.allDevices().map(\.id))
+            let removed = registrations.filter { $0.object != AudioObjectID(kAudioObjectSystemObject) && !current.contains($0.object) }
+            for var registration in removed {
+                AudioObjectRemovePropertyListenerBlock(registration.object, &registration.address, .main, registration.block)
+            }
+            registrations.removeAll { $0.object != AudioObjectID(kAudioObjectSystemObject) && !current.contains($0.object) }
+            let observed = Set(registrations.map(\.object))
+            for id in current where !observed.contains(id) {
+                observe(id, kAudioDevicePropertyDeviceIsAlive)
+                observe(id, kAudioDevicePropertyDataSource, scope: kAudioDevicePropertyScopeOutput)
+            }
+        }
+
+        public func stop() {
+            guard !stopped else { return }
+            stopped = true
+            for var registration in registrations {
+                AudioObjectRemovePropertyListenerBlock(registration.object, &registration.address, .main, registration.block)
+            }
+            registrations = []
+        }
+
+        deinit { stop() }
+    }
 
     /// IOProc 使用虚拟格式；物理格式只描述设备侧数据，不能作为回调缓冲格式。
     public static func virtualFormat(_ device: AudioDeviceID) -> AudioStreamBasicDescription? {

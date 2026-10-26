@@ -32,7 +32,7 @@ final class AppState: ObservableObject {
     @Published var networkMode: NetworkMode = .direct {
         didSet { defaults.set(networkMode.rawValue, forKey: "networkMode") }
     }
-    @Published var volume: Float = 1.0 {
+    @Published var volume: Float = 0.1 {
         didSet {
             player.volume = volume
             defaults.set(Double(volume), forKey: "volume")
@@ -130,8 +130,7 @@ final class AppState: ObservableObject {
             applyMutePolicy()
         }
     }
-    private var wasMutedBeforeUs = false
-    private var weMutedSystem = false
+    private var systemMuteSession: SystemOutput.MuteSession?
 
     private var playbackActive: Bool {
         switch playerState {
@@ -195,19 +194,17 @@ final class AppState: ObservableObject {
 
     private func applyMutePolicy() {
         guard !previewMode else { return }
-        if muteSystemWhileRunning && playbackActive {
-            if !SystemMute.isMuted() {
-                wasMutedBeforeUs = false
-                SystemMute.setMuted(true)
-                weMutedSystem = true
-                NCLog.log("[静音] 播放中, 系统已静音(挡其他 App 漏音)")
-            }
-        } else if weMutedSystem {
-            if !wasMutedBeforeUs {
-                SystemMute.setMuted(false)
-                NCLog.log("[静音] 播放结束, 系统声音已恢复")
-            }
-            weMutedSystem = false
+        var target = muteSystemWhileRunning && playbackActive ? SystemOutput.defaultOutputIdentity() : nil
+        // 已独占的目标没有其他 App 混音，不对音乐本身施加系统硬件静音。
+        if target?.id == player.deviceID { target = nil }
+        if systemMuteSession?.device != target {
+            systemMuteSession?.restore()
+            systemMuteSession = nil
+            volumeMirror.rebase()
+        }
+        if let target, systemMuteSession == nil {
+            systemMuteSession = SystemOutput.beginMuteSession(on: target)
+            volumeMirror.rebase()
         }
     }
 
@@ -339,13 +336,15 @@ final class AppState: ObservableObject {
         volumeMirror.onSystemVolume = { [weak self] value in
             Task { @MainActor in
                 guard let self else { return }
+                // 插拔后的等待状态不接受系统设备的初始音量（USB 设备常报告 100%）。
+                guard !self.outputNeedsUserPlay else { return }
                 if let manualAt = self.manualVolumeAt,
                    Date().timeIntervalSince(manualAt) < 2.0 { return }
                 self.volume = value
-                // 播放中若用户按音量键解除了静音, 重新拉起(百分比已生效, 挡漏音继续)
-                if self.muteSystemWhileRunning && self.playbackActive && !SystemMute.isMuted() {
-                    SystemMute.setMuted(true)
-                    NCLog.log("[静音] 播放中检测到解除静音, 已重新静音(音量已联动)")
+                if self.muteSystemWhileRunning && self.playbackActive {
+                    self.applyMutePolicy()
+                    self.systemMuteSession?.ensureMuted()
+                    self.volumeMirror.rebase()
                 }
             }
         }
@@ -382,16 +381,20 @@ final class AppState: ObservableObject {
         mediaControlKeysEnabled = defaults.bool(forKey: "mediaControlKeys")
 
         player.onStateChange = { [weak self] state in
+            let playbackID = self?.player.playbackID
             Task { @MainActor in
-                guard let self, self.playbackTask == nil else { return }
+                guard let self, self.playbackTask == nil, self.suspendedPlaybackPosition == nil,
+                      self.player.playbackID == playbackID, self.player.state == state else { return }
                 self.playerState = state
                 self.applyMutePolicy()
                 self.updateMediaKeyTap()
             }
         }
         player.onTrackChange = { [weak self] status in
+            let playbackID = self?.player.playbackID
             Task { @MainActor in
-                guard let self, self.playbackTask == nil else { return }
+                guard let self, self.playbackTask == nil, self.suspendedPlaybackPosition == nil,
+                      self.player.playbackID == playbackID else { return }
                 self.trackStatus = status
                 if self.lyricIndex >= 0, self.lyricIndex < self.lyrics.count {
                     self.updateLyricIndex(position: status.positionSeconds)
@@ -401,8 +404,10 @@ final class AppState: ObservableObject {
             }
         }
         player.onTrackFinished = { [weak self] in
+            let playbackID = self?.player.playbackID
             Task { @MainActor in
-                guard let self, self.playbackTask == nil else { return }
+                guard let self, self.playbackTask == nil, self.suspendedPlaybackPosition == nil,
+                      self.player.playbackID == playbackID, self.player.state == .playing else { return }
                 self.playNext(autoPlay: true)
             }
         }
@@ -426,7 +431,7 @@ final class AppState: ObservableObject {
 
     // MARK: - 设备
 
-    /// 设备是否自动跟随(耳机优先); 手动指定设备时为 false。
+    /// 自动模式优先外置输出；固定设备暂时离线时保留 UID，等待同一设备回来。
     @Published var autoDevice = true {
         didSet {
             defaults.set(!autoDevice, forKey: "devicePinned")
@@ -436,110 +441,90 @@ final class AppState: ObservableObject {
             }
         }
     }
+    /// 插拔后引擎已释放，但曲目与进度仍可由用户点击播放继续。
+    private(set) var suspendedPlaybackPosition: Double?
+    private var outputNeedsUserPlay = false
+    private var hotplugListener: AudioDevice.HotplugListener?
+    private var hotplugDebounceTask: Task<Void, Never>?
 
     func refreshDevices() {
         guard !previewMode else { return }
-        devices = AudioDevice.allDevices()
-        let savedUID = defaults.string(forKey: "deviceUID")
-        var chosen: AudioDeviceInfo?
-        if let savedUID {
-            if let match = devices.first(where: { $0.uid == savedUID }) {
-                autoDevice = false
-                chosen = match
-            } else {
-                // 固定的设备不存在(被拔出/更换): 回到自动模式
-                defaults.removeObject(forKey: "deviceUID")
-                autoDevice = true
-                NCLog.log("[设备] 固定设备不存在, 已回到自动跟随")
-            }
-        }
-        if chosen == nil { chosen = AudioDevice.preferredOutput() }
-        if let chosen {
-            if player.deviceID != chosen.id { player.stop() }
-            selectedDevice = chosen
-            player.deviceID = chosen.id
+        reconcileDevices(AudioDevice.allDevices(), defaultID: SystemOutput.defaultOutputDeviceID())
+    }
+
+    /// 接收同一次枚举的设备快照，避免枚举多次或递归刷新造成目标来回覆盖。
+    func reconcileDevices(_ available: [AudioDeviceInfo], defaultID: UInt32? = nil) {
+        devices = available
+        let chosen: AudioDeviceInfo?
+        if !autoDevice, let savedUID = defaults.string(forKey: "deviceUID") {
+            chosen = available.first { $0.uid == savedUID }
         } else {
-            player.stop()
+            chosen = AudioDevice.preferredOutput(in: available, defaultID: defaultID, preferredUID: selectedDevice?.uid)
+        }
+        let changed = selectedDevice?.uid != chosen?.uid || selectedDevice?.id != chosen?.id
+        guard changed else {
+            selectedDevice = chosen // 采样率等显示信息可以刷新，不打断播放。
+            return
+        }
+        suspendForOutputChange()
+        selectedDevice = chosen
+        player.deviceID = chosen?.id ?? 0
+        NCLog.log("[设备] 输出变更 → \(chosen?.name ?? "设备离线")，等待用户播放；音量 \(Int(volume * 100))%")
+    }
+
+    private func suspendForOutputChange() {
+        let hasTrack = currentItem != nil || tracks.indices.contains(currentIndex)
+        let position = suspendedPlaybackPosition ?? trackStatus.positionSeconds
+        let status = trackStatus
+        cancelPendingPlayback() // 晚到的下载、解析和歌词也不能在设备恢复后启动播放。
+        if !isRestoringState { outputNeedsUserPlay = true }
+        suspendedPlaybackPosition = hasTrack ? position : nil
+        player.stop() // 先释放旧设备；不会把声音接到扬声器或新插入的设备。
+        trackStatus = status
+        trackStatus.exclusive = false
+        playerState = hasTrack ? .paused : .idle
+        volume = min(volume, 0.1) // 保留静音和更低音量；新连接输出最多 10%。
+        volumeMirror.rebase()
+        applyMutePolicy()
+        updateMediaKeyTap()
+    }
+
+    private func setupHotplugListener() {
+        hotplugListener = AudioDevice.HotplugListener { [weak self] invalidatedDeviceID in
+            self?.scheduleHotplugHandling(invalidatedDeviceID: invalidatedDeviceID)
+        }
+    }
+
+    /// 拔出立即停止，插入等待事件稳定后再选择；两条路径都不启动播放。
+    func scheduleHotplugHandling(invalidatedDeviceID: UInt32?) {
+        volumeMirror.rebase()
+        if let invalidatedDeviceID, invalidatedDeviceID == selectedDevice?.id {
+            // 极快重插可能复用同一 ID + UID；alive/data-source 事件本身即令旧 IO 失效。
+            suspendForOutputChange()
             selectedDevice = nil
             player.deviceID = 0
         }
-    }
-
-    /// 热插拔: 自动模式下跟随耳机, 并保留进度续播。
-    private func setupHotplugListener() {
-        AudioDevice.startDeviceHotplugListener { [weak self] in
-            DispatchQueue.main.async {
-                self?.scheduleHotplugHandling()
-            }
+        let available = AudioDevice.allDevices()
+        if let selectedDevice,
+           !available.contains(where: { $0.id == selectedDevice.id && $0.uid == selectedDevice.uid }) {
+            reconcileDevices(available, defaultID: SystemOutput.defaultOutputDeviceID())
         }
-    }
-
-    /// 热插拔防抖: 事件风暴合并为一次处理(插拔常触发一串设备列表事件)。
-    private var hotplugDebounceTask: Task<Void, Never>?
-    private var lastPlaybackRestartAt = Date.distantPast
-
-    private func scheduleHotplugHandling() {
         hotplugDebounceTask?.cancel()
         hotplugDebounceTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 1_200_000_000)   // 1.2s 静默期后处理
+            try? await Task.sleep(nanoseconds: 800_000_000)
             guard !Task.isCancelled else { return }
-            self?.handleHotplug()
-        }
-    }
-
-    private func handleHotplug() {
-        let wasActive: Bool
-        switch playerState {
-        case .playing, .paused: wasActive = true
-        case .loading: wasActive = true
-        default: wasActive = false
-        }
-        let oldUID = selectedDevice?.uid
-        refreshDevices()
-        guard let now = selectedDevice, now.uid != oldUID else {
-            if wasActive, case .error = playerState {
-                restartPlaybackOnDeviceIfAny()
-            }
-            return
-        }
-        NCLog.log("[设备] 热插拔: \(oldUID ?? "无") → \(now.name) 自动跟随=\(autoDevice ? "是" : "否")")
-        if wasActive || currentItem != nil || currentIndex >= 0 {
-            restartPlaybackOnDeviceIfAny()
-        }
-    }
-
-    /// 在当前选定设备上重启播放(记忆进度)。
-    private func restartPlaybackOnDeviceIfAny() {
-        // 限流: 3 秒内的重复重启直接跳过(设备抖动会连发事件)
-        guard Date().timeIntervalSince(lastPlaybackRestartAt) > 3.0 else {
-            NCLog.log("[设备] 重启限流生效, 跳过本次")
-            return
-        }
-        lastPlaybackRestartAt = Date()
-        let resumeAt = trackStatus.positionSeconds
-        player.stop()
-        player.deviceID = selectedDevice?.id ?? 0
-        guard player.deviceID != 0 else { return }
-        if let item = currentItem {
-            play(item: item, resumeAt: resumeAt)
-        } else if currentIndex >= 0, tracks.indices.contains(currentIndex) {
-            play(index: currentIndex, resumeAt: resumeAt)
+            self?.refreshDevices()
         }
     }
 
     func selectDevice(_ device: AudioDeviceInfo) {
-        let resumeAt = trackStatus.positionSeconds
-        player.stop() // 先释放旧设备，再更新引擎的目标 ID。
+        hotplugDebounceTask?.cancel()
+        let changed = selectedDevice?.uid != device.uid || selectedDevice?.id != device.id
+        if changed { suspendForOutputChange() }
         autoDevice = false
+        defaults.set(device.uid, forKey: "deviceUID")
         selectedDevice = device
         player.deviceID = device.id
-        defaults.set(device.uid, forKey: "deviceUID")
-        // 网易、B站与直链都在新设备上从原进度继续。
-        if let item = currentItem {
-            play(item: item, resumeAt: resumeAt)
-        } else if currentIndex >= 0, tracks.indices.contains(currentIndex) {
-            play(index: currentIndex, resumeAt: resumeAt)
-        }
     }
 
     // MARK: - 登录
@@ -548,7 +533,7 @@ final class AppState: ObservableObject {
         if client.isLoggedIn {
             await finishLogin()   // 单一收尾路径: 取账号+歌单(带重试)
             if profile != nil {
-                if autoResume, let lastId = defaults.object(forKey: "lastPlaylistId") as? Int,
+                if autoResume, !outputNeedsUserPlay, let lastId = defaults.object(forKey: "lastPlaylistId") as? Int,
                    let playlist = playlists.first(where: { $0.id == lastId }) {
                     await openPlaylist(playlist, autoPlay: true)
                 }
@@ -671,6 +656,7 @@ final class AppState: ObservableObject {
 
     func logout() {
         cancelPendingPlayback()
+        suspendedPlaybackPosition = nil
         player.stop()
         currentItem = nil
         itemQueue = []
@@ -687,13 +673,14 @@ final class AppState: ObservableObject {
     // MARK: - 歌单与播放
 
     func openPlaylist(_ playlist: NCPlaylist, autoPlay: Bool = false) async {
+        let requestID = playbackRequestID
         currentPlaylist = playlist
         defaults.set(playlist.id, forKey: "lastPlaylistId")
         tracks = []
         let loaded = (try? await client.playlistTracks(playlistId: playlist.id)) ?? []
         guard currentPlaylist?.id == playlist.id else { return }   // 防串台
         tracks = loaded
-        if autoPlay, !loaded.isEmpty {
+        if autoPlay, requestID == playbackRequestID, !loaded.isEmpty {
             play(index: 0)
         }
     }
@@ -725,7 +712,9 @@ final class AppState: ObservableObject {
 
     func play(index: Int, resumeAt: Double? = nil) {
         guard tracks.indices.contains(index) else { return }
+        guard prepareOutputForPlayback() else { return }
         let requestID = beginPlaybackRequest()
+        suspendedPlaybackPosition = nil
         currentItem = nil
         itemQueue = []
         currentIndex = index
@@ -767,7 +756,9 @@ final class AppState: ObservableObject {
 
     /// 播放一个已解析好的条目(网易/B站/直链)。
     func play(item: PlayableItem, resumeAt: Double? = nil) {
+        guard prepareOutputForPlayback() else { return }
         let requestID = beginPlaybackRequest()
+        suspendedPlaybackPosition = nil
         currentItem = item
         if !itemQueue.contains(where: { $0.id == item.id }) { itemQueue = [item] }
         currentIndex = -1
@@ -801,7 +792,9 @@ final class AppState: ObservableObject {
             quickPlayError = "无法识别: 支持网易云歌曲链接/ID、B站链接/BV号、音频直链"
             return
         }
+        guard prepareOutputForPlayback() else { return }
         let requestID = beginPlaybackRequest()
+        suspendedPlaybackPosition = nil
         quickPlayBusy = true
         playerState = .loading("解析来源…")
         playbackTask = Task {
@@ -844,7 +837,25 @@ final class AppState: ObservableObject {
         else if autoPlay { cancelPendingPlayback(); player.stop() }
     }
 
+    /// 点播前重新核对当前设备，不能在断开与防抖之间向旧 ID 输出。
+    private func prepareOutputForPlayback() -> Bool {
+        if !previewMode { refreshDevices() }
+        guard previewMode || selectedDevice != nil else {
+            loadingHint = "输出设备未连接，请连接后点击播放"
+            return false
+        }
+        volumeMirror.rebase()
+        player.volume = volume
+        outputNeedsUserPlay = false
+        return true
+    }
+
     func playPause() {
+        if let position = suspendedPlaybackPosition {
+            if let item = currentItem { play(item: item, resumeAt: position) }
+            else if tracks.indices.contains(currentIndex) { play(index: currentIndex, resumeAt: position) }
+            return
+        }
         switch playerState {
         case .playing: player.pause()
         case .paused: player.resume()
@@ -1030,6 +1041,12 @@ final class AppState: ObservableObject {
 
     /// 拖动进度。
     func seek(to seconds: Double) {
+        if suspendedPlaybackPosition != nil {
+            guard seconds.isFinite else { return }
+            suspendedPlaybackPosition = min(max(seconds, 0), max(trackStatus.seconds, 0))
+            trackStatus.positionSeconds = suspendedPlaybackPosition ?? 0
+            return
+        }
         player.seek(to: seconds)
         trackStatus.positionSeconds = seconds
     }
@@ -1052,13 +1069,14 @@ final class AppState: ObservableObject {
         qrPollTask?.cancel()
         biliPollTask?.cancel()
         hotplugDebounceTask?.cancel()
+        hotplugListener?.stop()
+        hotplugListener = nil
         stopPermissionPolling()
         volumeMirror.stop()
         mediaKeyTap.isEnabled = false
         player.shutdown()
-        if weMutedSystem, !wasMutedBeforeUs {
-            SystemMute.setMuted(false)   // 退出时还原系统声音
-        }
+        systemMuteSession?.restore()
+        systemMuteSession = nil
     }
 }
 

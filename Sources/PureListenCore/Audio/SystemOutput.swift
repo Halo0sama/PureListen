@@ -25,6 +25,17 @@ public enum SystemOutput {
         return device
     }
 
+    public struct Identity: Equatable {
+        public let id: AudioDeviceID
+        public let uid: String
+        public init(id: AudioDeviceID, uid: String) { self.id = id; self.uid = uid }
+    }
+
+    public static func defaultOutputIdentity() -> Identity? {
+        guard let id = defaultOutputDeviceID(), let uid = AudioDevice.uid(for: id) else { return nil }
+        return Identity(id: id, uid: uid)
+    }
+
     /// 默认输出设备的可读名字（诊断用）。
     public static func defaultOutputDeviceName() -> String? {
         guard let device = defaultOutputDeviceID() else { return nil }
@@ -41,6 +52,10 @@ public enum SystemOutput {
 
     public static func volume() -> Float? {
         guard let device = defaultOutputDeviceID() else { return nil }
+        return volume(on: device)
+    }
+
+    public static func volume(on device: AudioDeviceID) -> Float? {
         if let main: Float32 = read(device, kAudioDevicePropertyVolumeScalar) {
             return clamp(main)
         }
@@ -85,38 +100,69 @@ public enum SystemOutput {
         return channels.contains { $0 != 0 }
     }
 
-    /// 设置系统静音。优先用设备的 mute 属性（保留音量百分比，音量联动不受影响）；
-    /// 设备没有 mute 属性时退回"音量归零 + 记住原值"。
-    @discardableResult
-    public static func setMuted(_ muted: Bool) -> Bool {
-        guard let device = defaultOutputDeviceID() else { return false }
-        let flag: UInt32 = muted ? 1 : 0
-        if isSettable(device, kAudioDevicePropertyMute) {
-            return write(device, kAudioDevicePropertyMute, value: flag)
+    /// 保护会话绑定实际被修改设备的 ID + UID；不能把旧设备的静音/音量恢复到新默认输出。
+    public struct MuteSession {
+        public let device: Identity
+        struct Control {
+            let selector: AudioObjectPropertySelector
+            let element: AudioObjectPropertyElement
+            let original: Float
         }
-        for element in 1...4 {
-            let propertyElement = AudioObjectPropertyElement(element)
-            if isSettable(device, kAudioDevicePropertyMute, element: propertyElement) {
-                return write(device, kAudioDevicePropertyMute,
-                             element: propertyElement, value: flag)
+        let controls: [Control]
+        var uidForDevice: (AudioDeviceID) -> String? = AudioDevice.uid(for:)
+        var writeControl: (AudioDeviceID, AudioObjectPropertySelector, AudioObjectPropertyElement, Float) -> Bool = { id, selector, element, value in
+            if selector == kAudioDevicePropertyMute {
+                return SystemOutput.write(id, selector, element: element, value: UInt32(value))
             }
+            return SystemOutput.write(id, selector, element: element, value: value)
         }
 
-        // 兜底：用音量 0 模拟静音，并记住原音量以便恢复。
-        if muted {
-            if mutedFallbackVolume == nil { mutedFallbackVolume = volume() }
-            return setVolume(0)
-        } else {
-            defer { mutedFallbackVolume = nil }
-            if let saved = mutedFallbackVolume { return setVolume(saved) }
-            return true
+        @discardableResult
+        public func ensureMuted() -> Bool { apply(restoring: false) }
+
+        @discardableResult
+        public func restore() -> Bool { apply(restoring: true) }
+
+        private func apply(restoring: Bool) -> Bool {
+            guard uidForDevice(device.id) == device.uid else { return false }
+            var applied = true
+            for control in controls {
+                let value = restoring ? control.original : (control.selector == kAudioDevicePropertyMute ? 1 : 0)
+                applied = writeControl(device.id, control.selector, control.element, value) && applied
+            }
+            return applied
         }
     }
 
-    // MARK: - 内部
+    public static func beginMuteSession(on device: Identity) -> MuteSession? {
+        guard AudioDevice.uid(for: device.id) == device.uid else { return nil }
+        var controls: [MuteSession.Control] = []
+        for selector in [kAudioDevicePropertyMute, kAudioDevicePropertyVolumeScalar] {
+            for element: AudioObjectPropertyElement in [0, 1, 2, 3, 4] {
+                guard isSettable(device.id, selector, element: element) else { continue }
+                let original: Float?
+                if selector == kAudioDevicePropertyMute {
+                    let value: UInt32? = read(device.id, selector, element: element)
+                    original = value.map(Float.init)
+                } else {
+                    original = read(device.id, selector, element: element)
+                }
+                guard let original, original.isFinite else { continue }
+                controls.append(MuteSession.Control(selector: selector, element: element, original: original))
+                if element == 0 { break }
+            }
+            if !controls.isEmpty { break } // 有 mute 属性时保留硬件音量；否则保存每个声道的原音量。
+        }
+        guard !controls.isEmpty else { return nil }
+        let session = MuteSession(device: device, controls: controls)
+        guard session.ensureMuted() else {
+            session.restore()
+            return nil
+        }
+        return session
+    }
 
-    /// 设备没有 mute 属性时，记录静音前的音量。
-    private static var mutedFallbackVolume: Float?
+    // MARK: - 内部
 
     private static let outputScope = kAudioDevicePropertyScopeOutput
 
