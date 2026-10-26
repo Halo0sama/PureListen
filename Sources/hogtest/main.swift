@@ -58,6 +58,65 @@ if arguments.count > 1, arguments[1] == "devices" {
     }
     exit(0)
 }
+if arguments.count > 2, arguments[1] == "verify-muted-gain" {
+    guard let id = UInt32(arguments[2]), let device = AudioDevice.allDevices().first(where: { $0.id == id }),
+          let originalGuard = SystemOutput.beginMuteSession(on: .init(id: id, uid: device.uid)),
+          let originalMute = originalGuard.originalMute else {
+        print("设备需要可读写硬件静音才能安全执行此验证"); exit(1)
+    }
+    let originalVolume = SystemOutput.volume(on: id)
+    print("initialHardwareMute=\(originalMute) initialHardwareVolume=\(String(describing: originalVolume))")
+    let path = NSTemporaryDirectory() + "PureListen-\(UUID().uuidString).wav"
+    writeWav(path: path, sampleRate: 48000, seconds: 3, freq: 440, amp: 0.08)
+    let player = ExclusivePlayer()
+    player.deviceID = id
+    player.volume = 0
+    player.blockOtherOutputs = arguments.contains("--block-others")
+    player.ioDumpEnabled = true
+    defer {
+        player.volume = 0; player.shutdown()
+        originalGuard.restore()
+        try? FileManager.default.removeItem(atPath: path)
+    }
+    func pump(_ seconds: Double) {
+        let until = Date().addingTimeInterval(seconds)
+        while Date() < until { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+    }
+    var metadata = ExclusivePlayer.TrackStatus()
+    metadata.title = "硬件静音与软件增益验证"
+    player.playFile(url: URL(fileURLWithPath: path), metadata: metadata)
+    pump(0.15)
+    let unmuted = player.state == .playing && SystemOutput.isMuted(on: id) == false
+    player.pause()
+    pump(0.1)
+    let pauseRestored = SystemOutput.isMuted(on: id) == true
+    player.resume()
+    let resumeUnmuted = player.state == .playing && SystemOutput.isMuted(on: id) == false
+    // 软件始终为 0，直到明确确认硬件重新静音；随后用 10% 软件增益采集非零实际 IO。
+    let hardwareGuard = SystemOutput.beginMuteSession(on: .init(id: id, uid: device.uid))
+    let guarded = hardwareGuard != nil && SystemOutput.isMuted(on: id) == true
+    if guarded { player.volume = 0.1; pump(0.3) }
+    player.shutdown() // 在硬件静音下停止 IO，恢复起播前的 mute=1。
+    let output = player.ioDump
+    let nonzero = output.contains { abs($0) > 0.000001 }
+    let safe = output.allSatisfy { $0.isFinite && abs($0) <= 0.01 }
+    let restoredAfterStop = SystemOutput.isMuted(on: id) == true
+    // USB DAC 的控制恢复在持有独占时执行，与播放器停止的顺序一致。
+    let restoreHog = AudioDevice.takeHog(id)
+    let restoreApplied = restoreHog && originalGuard.restore()
+    if restoreHog { AudioDevice.releaseHog(id) }
+    pump(0.1)
+    print("restoreApplied=\(restoreApplied) finalHardwareMute=\(String(describing: SystemOutput.isMuted(on: id))) finalHardwareVolume=\(String(describing: SystemOutput.volume(on: id)))")
+    let finalRestored = SystemOutput.isMuted(on: id) == originalMute && SystemOutput.volume(on: id) == originalVolume
+    let passed = unmuted && pauseRestored && resumeUnmuted && guarded && nonzero && safe && restoredAfterStop && finalRestored
+    print("device=\(device.name) unmuteOnPlay=\(unmuted) restoreOnPause=\(pauseRestored) unmuteOnResume=\(resumeUnmuted)")
+    print("hardwareMutedDuringPositiveGain=\(guarded) samples=\(output.count) nonzero=\(nonzero) boundedTo10Percent=\(safe)")
+    print("stopRestored=\(restoredAfterStop) originalMuteAndHardwareVolumeRestored=\(finalRestored)")
+    print(passed ? "PASS: 静音保护下的非零 IO 增益验证通过" : "FAIL: 硬件静音/非零 IO 验证失败")
+    // exit 不执行顶层 defer，显式清理临时文件；硬件已在上方恢复。
+    try? FileManager.default.removeItem(atPath: path)
+    exit(passed ? 0 : 1)
+}
 if arguments.count > 3, arguments[1] == "verify-silent" {
     guard let id = UInt32(arguments[3]), let device = AudioDevice.allDevices().first(where: { $0.id == id }) else {
         print("未找到指定设备"); exit(1)

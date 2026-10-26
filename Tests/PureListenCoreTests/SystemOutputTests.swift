@@ -45,4 +45,42 @@ final class SystemOutputTests: XCTestCase {
         XCTAssertTrue(session.restore())
         XCTAssertEqual(values, [1, 1])
     }
+    func testExclusivePlaybackUnmutesOnlyTargetAndRestoresMasterAndChannelMute() {
+        let identity = SystemOutput.Identity(id: 10, uid: "dac")
+        var writes: [(UInt32, UInt32, UInt32, Float)] = []
+        var session = SystemOutput.MuteSession(device: identity, controls: [
+            .init(selector: kAudioDevicePropertyMute, element: 0, original: 1),
+            .init(selector: kAudioDevicePropertyMute, element: 1, original: 0),
+            .init(selector: kAudioDevicePropertyMute, element: 2, original: 1)
+        ], activeMuteValue: 0)
+        session.uidForDevice = { _ in "dac" }
+        session.writeControl = { id, selector, element, value in
+            writes.append((id, selector, element, value)); return true
+        }
+        XCTAssertTrue(session.apply())
+        XCTAssertEqual(writes.map(\.3), [0, 0, 0])
+        XCTAssertTrue(session.restore())
+        XCTAssertEqual(writes.suffix(3).map(\.3), [1, 0, 1])
+        XCTAssertTrue(writes.allSatisfy { $0.0 == 10 && $0.1 == kAudioDevicePropertyMute })
+        writes = []
+        session.uidForDevice = { _ in "different-device" }
+        XCTAssertFalse(session.apply())
+        XCTAssertFalse(session.restore())
+        XCTAssertTrue(writes.isEmpty)
+    }
+
+    func testControlWriteMustBeConfirmedByReadback() {
+        var reads = 0
+        var session = SystemOutput.MuteSession(device: .init(id: 10, uid: "dac"), controls: [
+            .init(selector: kAudioDevicePropertyMute, element: 0, original: 1)
+        ], activeMuteValue: 0)
+        session.uidForDevice = { _ in "dac" }
+        session.writeControl = { _, _, _, _ in true }
+        session.readControl = { _, _, _ in reads += 1; return reads < 3 ? 1 : 0 }
+        XCTAssertTrue(session.apply())
+        XCTAssertGreaterThanOrEqual(reads, 4)
+        session.readControl = { _, _, _ in 1 }
+        XCTAssertFalse(session.apply()) // 只收到写入成功，而设备实际仍静音，不能视为可输出。
+    }
+
 }

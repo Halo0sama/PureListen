@@ -43,6 +43,7 @@ public final class ExclusivePlayer {
 
     public var deviceID: AudioDeviceID = 0
     private var activeDeviceID: AudioDeviceID = 0
+    private var playbackUnmuteSession: SystemOutput.MuteSession?
     /// 调试：停止后读取实际写向设备的采样（音量后）；回调中只写预分配存储。
     public var ioDump: [Float32] { Array(ioDumpStorage.prefix(ioDumpCount)) }
     private var ioDumpStorage: [Float32] = []
@@ -178,6 +179,7 @@ public final class ExclusivePlayer {
         AudioDeviceStop(activeDeviceID, ioProcID)
         AudioDeviceDestroyIOProcID(activeDeviceID, ioProcID)
         self.ioProcID = nil
+        restorePlaybackMute()
         restoreOriginalRate()
         if activeDeviceExists { AudioDevice.releaseHog(activeDeviceID) }
         releaseOtherOutputs()
@@ -191,11 +193,14 @@ public final class ExclusivePlayer {
             state = .error("设备已变更(耳机重新插入?), 请重新点播")
             return
         }
-        guard AudioDevice.takeHog(activeDeviceID) else {
-            state = .error("设备被其他程序占用, 片刻后再试")
-            return
-        }
         do {
+            if let uid = activeDeviceUID {
+                playbackUnmuteSession = try SystemOutput.playbackUnmuteSession(on: .init(id: activeDeviceID, uid: uid))
+            }
+            guard AudioDevice.takeHog(activeDeviceID) else {
+                throw NSError(domain: "ExclusivePlayer", code: -6,
+                              userInfo: [NSLocalizedDescriptionKey: "设备被其他程序占用，片刻后再试"])
+            }
             guard rememberAndSetRate(Double(trackStatus.deviceRate)),
                   let virtual = AudioDevice.virtualFormat(activeDeviceID),
                   Int(virtual.mChannelsPerFrame) == Int(clientFormat.mChannelsPerFrame) else {
@@ -222,6 +227,10 @@ public final class ExclusivePlayer {
     }
 
     private func startIO() throws {
+        if let session = playbackUnmuteSession, !session.apply() {
+            throw NSError(domain: "ExclusivePlayer", code: -8,
+                          userInfo: [NSLocalizedDescriptionKey: "无法解除输出设备的硬件静音"])
+        }
         var ioProc: AudioDeviceIOProcID?
         let selfPtr = Unmanaged.passUnretained(self).toOpaque()
         let createStatus = AudioDeviceCreateIOProcID(activeDeviceID, Self.ioCallbackImpl, selfPtr, &ioProc)
@@ -242,6 +251,14 @@ public final class ExclusivePlayer {
     public func stop() {
         stopPlayback()
         state = .idle
+    }
+
+    private func restorePlaybackMute() {
+        if let session = playbackUnmuteSession {
+            let restored = session.restore()
+            NCLog.log("[硬件静音] 恢复原状态=\(String(describing: session.originalMute)) 成功=\(restored)")
+        }
+        playbackUnmuteSession = nil
     }
 
     // MARK: - 进度拖动
@@ -335,6 +352,10 @@ public final class ExclusivePlayer {
                          fileRate, fileBits, Int(fileFormat.mChannelsPerFrame)))
 
         // 2. 独占设备 + 把设备采样率切到与音源一致
+        if let uid = activeDeviceUID {
+            playbackUnmuteSession = try SystemOutput.playbackUnmuteSession(on: .init(id: activeDeviceID, uid: uid))
+            NCLog.log("[硬件静音] 起播前原状态=\(String(describing: playbackUnmuteSession?.originalMute))")
+        }
         let hogged = AudioDevice.takeHog(activeDeviceID)
         trackStatus.exclusive = hogged
         guard hogged else {
@@ -550,6 +571,7 @@ public final class ExclusivePlayer {
         renderScratch = nil
         outputPCM = nil
         ring = nil
+        restorePlaybackMute()
         restoreOriginalRate()
         if activeDeviceExists { AudioDevice.releaseHog(activeDeviceID) }
         releaseOtherOutputs()

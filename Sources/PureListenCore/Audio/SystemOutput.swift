@@ -89,6 +89,10 @@ public enum SystemOutput {
 
     public static func isMuted() -> Bool? {
         guard let device = defaultOutputDeviceID() else { return nil }
+        return isMuted(on: device)
+    }
+
+    public static func isMuted(on device: AudioDeviceID) -> Bool? {
         if let main: UInt32 = read(device, kAudioDevicePropertyMute) {
             return main != 0
         }
@@ -109,6 +113,12 @@ public enum SystemOutput {
             let original: Float
         }
         let controls: [Control]
+        public var originalMute: Bool? {
+            let muteControls = controls.filter { $0.selector == kAudioDevicePropertyMute }
+            return muteControls.isEmpty ? nil : muteControls.contains { $0.original != 0 }
+        }
+        /// 系统保护置 1；独占播放临时解除设备硬件静音时置 0。
+        var activeMuteValue: Float = 1
         var uidForDevice: (AudioDeviceID) -> String? = AudioDevice.uid(for:)
         var writeControl: (AudioDeviceID, AudioObjectPropertySelector, AudioObjectPropertyElement, Float) -> Bool = { id, selector, element, value in
             if selector == kAudioDevicePropertyMute {
@@ -116,9 +126,13 @@ public enum SystemOutput {
             }
             return SystemOutput.write(id, selector, element: element, value: value)
         }
+        var readControl: ((AudioDeviceID, AudioObjectPropertySelector, AudioObjectPropertyElement) -> Float?)?
 
         @discardableResult
         public func ensureMuted() -> Bool { apply(restoring: false) }
+
+        @discardableResult
+        public func apply() -> Bool { apply(restoring: false) }
 
         @discardableResult
         public func restore() -> Bool { apply(restoring: true) }
@@ -127,11 +141,50 @@ public enum SystemOutput {
             guard uidForDevice(device.id) == device.uid else { return false }
             var applied = true
             for control in controls {
-                let value = restoring ? control.original : (control.selector == kAudioDevicePropertyMute ? 1 : 0)
+                let value = restoring ? control.original : (control.selector == kAudioDevicePropertyMute ? activeMuteValue : 0)
                 applied = writeControl(device.id, control.selector, control.element, value) && applied
             }
-            return applied
+            guard applied, let readControl else { return applied }
+            // USB 控制异步生效；写入成功不代表设备已经解除/恢复静音。
+            var matches = 0
+            for _ in 0..<40 {
+                let correct = controls.allSatisfy { control in
+                    let expected = restoring ? control.original : (control.selector == kAudioDevicePropertyMute ? activeMuteValue : 0)
+                    guard let actual = readControl(device.id, control.selector, control.element) else { return false }
+                    return abs(actual - expected) < 0.00001
+                }
+                matches = correct ? matches + 1 : 0
+                if matches >= 2 { return true }
+                usleep(5_000)
+            }
+            for control in controls {
+                NCLog.log("[静音回读失败] 恢复=\(restoring) 原值=\(control.original) 活动值=\(activeMuteValue) 现值=\(String(describing: readControl(device.id, control.selector, control.element)))")
+            }
+            return false
         }
+    }
+
+    /// 在获取独占前捕获硬件 mute；调用 apply() 解除静音，结束后 restore() 还原。
+    public static func playbackUnmuteSession(on device: Identity) throws -> MuteSession? {
+        guard AudioDevice.uid(for: device.id) == device.uid else {
+            throw NSError(domain: "SystemOutput", code: -1,
+                          userInfo: [NSLocalizedDescriptionKey: "输出设备已断开"])
+        }
+        var controls: [MuteSession.Control] = []
+        for element: AudioObjectPropertyElement in 0...32 {
+            guard let value: UInt32 = read(device.id, kAudioDevicePropertyMute, element: element) else { continue }
+            // 已静音但不可解除时，明确失败，避免界面显示播放却无声。
+            guard isSettable(device.id, kAudioDevicePropertyMute, element: element) else {
+                if value != 0 {
+                    throw NSError(domain: "SystemOutput", code: -2,
+                                  userInfo: [NSLocalizedDescriptionKey: "输出设备处于硬件静音，请先解除设备静音"])
+                }
+                continue
+            }
+            controls.append(.init(selector: kAudioDevicePropertyMute, element: element, original: Float(value)))
+        }
+        guard !controls.isEmpty else { return nil } // 没有硬件 mute 的设备仍可播放。
+        return MuteSession(device: device, controls: controls, activeMuteValue: 0, readControl: controlValue)
     }
 
     public static func beginMuteSession(on device: Identity) -> MuteSession? {
@@ -143,7 +196,7 @@ public enum SystemOutput {
                 let original: Float?
                 if selector == kAudioDevicePropertyMute {
                     let value: UInt32? = read(device.id, selector, element: element)
-                    original = value.map(Float.init)
+                    original = value.map { Float($0) }
                 } else {
                     original = read(device.id, selector, element: element)
                 }
@@ -154,7 +207,7 @@ public enum SystemOutput {
             if !controls.isEmpty { break } // 有 mute 属性时保留硬件音量；否则保存每个声道的原音量。
         }
         guard !controls.isEmpty else { return nil }
-        let session = MuteSession(device: device, controls: controls)
+        let session = MuteSession(device: device, controls: controls, readControl: controlValue)
         guard session.ensureMuted() else {
             session.restore()
             return nil
@@ -163,6 +216,16 @@ public enum SystemOutput {
     }
 
     // MARK: - 内部
+
+    private static func controlValue(_ device: AudioDeviceID, _ selector: AudioObjectPropertySelector,
+                                     _ element: AudioObjectPropertyElement) -> Float? {
+        if selector == kAudioDevicePropertyMute {
+            let value: UInt32? = read(device, selector, element: element)
+            // 明确做数值转换；map(Float.init) 可能选中 init(bitPattern:)。
+            return value.map { Float($0) }
+        }
+        return read(device, selector, element: element)
+    }
 
     private static let outputScope = kAudioDevicePropertyScopeOutput
 
