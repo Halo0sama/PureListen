@@ -9,18 +9,20 @@ public final class NCClient {
     static let apiDomain = "https://interface3.music.163.com"
 
     /// 持久化的 Cookie(含 MUSIC_U)。
-    public private(set) var cookies: [String: String]
+    private var storedCookies: [String: String]
+    private let cookieLock = NSLock()
+    public var cookies: [String: String] {
+        cookieLock.lock()
+        defer { cookieLock.unlock() }
+        return storedCookies
+    }
     /// 持久化设备 id(网易风控用)。
     public let deviceId: String
-    /// 传输走 curl: 网易 WAF 按 TLS 指纹区别对待, CFNetwork(URLSession) 会被降级为空响应,
-    /// curl/OpenSSL 指纹不受影响(已同参数对比验证)。
-    private let curlQueue = DispatchQueue(label: "PureListen.curl")
-
     public var isLoggedIn: Bool { cookies["MUSIC_U"]?.isEmpty == false }
 
-    /// sessionOverride: "direct"=强制直连, "proxy7897"=显式走本机代理, nil=默认(直连)
+    /// sessionOverride 保留兼容；网络策略由 NetworkMode 统一管理。
     public init(cookies: [String: String] = [:], deviceId: String? = nil, sessionOverride: String? = nil) {
-        self.cookies = cookies
+        self.storedCookies = cookies
         if let deviceId, !deviceId.isEmpty {
             self.deviceId = deviceId
         } else {
@@ -33,16 +35,16 @@ public final class NCClient {
     /// 与官方/参照实现一致的风控 Cookie 配方(一次性生成, 随 cookies 持久化)。
     private func seedRiskControlCookies() {
         let ms = String(Int(Date().timeIntervalSince1970 * 1000))
-        if cookies["_ntes_nuid"] == nil {
+        if storedCookies["_ntes_nuid"] == nil {
             let hexChars = Array("0123456789abcdef")
             let nuid = String((0..<64).map { _ in hexChars.randomElement()! })
-            cookies["_ntes_nuid"] = nuid
-            cookies["_ntes_nnid"] = "\(nuid),\(ms)"
+            storedCookies["_ntes_nuid"] = nuid
+            storedCookies["_ntes_nnid"] = "\(nuid),\(ms)"
         }
-        if cookies["WNMCID"] == nil {
+        if storedCookies["WNMCID"] == nil {
             let letters = Array("abcdefghijklmnopqrstuvwxyz")
             let rand6 = String((0..<6).map { _ in letters.randomElement()! })
-            cookies["WNMCID"] = "\(rand6).\(ms).01.0"
+            storedCookies["WNMCID"] = "\(rand6).\(ms).01.0"
         }
     }
 
@@ -76,61 +78,20 @@ public final class NCClient {
 
     // MARK: - Set-Cookie 手动解析
 
-    private let cookieLock = NSLock()
-
     // MARK: - curl 传输
 
     /// 执行 curl, 返回 (body, 原始响应头文本, http状态码)。响应头含每一次重定向跳转。
     private func curlExecute(url: URL, method: String, headers: [String: String],
                              body: String?) async throws -> (Data, String, Int) {
-        let tmp = NSTemporaryDirectory() + UUID().uuidString
-        let headerFile = tmp + ".h", bodyFile = tmp + ".b", dataFile = tmp + ".d"
-        defer {
-            for f in [headerFile, bodyFile, dataFile] { try? FileManager.default.removeItem(atPath: f) }
-        }
-        if let body { try body.write(toFile: bodyFile, atomically: true, encoding: .utf8) }
-
-        var args = ["/usr/bin/curl", "-s", "--compressed", "-L", "-m", "30",
-                    "-D", headerFile, "-o", dataFile, "-w", "%{http_code}"]
-        if ProcessInfo.processInfo.environment["NC_FORCE_HTTP11"] != nil {
-            args.append("--http1.1")   // 火山 CDN 对 H2+非浏览器指纹的组合会返回空响应
-        }
-        args += ["-X", method, url.absoluteString]
-        for (k, v) in headers { args += ["-H", "\(k): \(v)"] }
-        if body != nil { args += ["--data-binary", "@\(bodyFile)"] }
-
-        return try await withCheckedThrowingContinuation { continuation in
-            curlQueue.async {
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
-                process.arguments = Array(args.dropFirst())
-                process.standardOutput = Pipe()
-                process.standardError = Pipe()
-                do {
-                    try process.run()
-                    process.waitUntilExit()
-                    let outData = (process.standardOutput as? Pipe)?
-                        .fileHandleForReading.readDataToEndOfFile() ?? Data()
-                    let code = Int(String(data: outData, encoding: .utf8) ?? "0") ?? 0
-                    let headers = (try? String(contentsOfFile: headerFile, encoding: .utf8)) ?? ""
-                    let data = (try? Data(contentsOf: URL(fileURLWithPath: dataFile))) ?? Data()
-                    if data.isEmpty, ProcessInfo.processInfo.environment["NCDEBUG"] != nil {
-                        print("[NCDEBUG] curl exit=\(process.terminationStatus) http=\(code)")
-                        print("[NCDEBUG] argv=\(args.dropFirst().joined(separator: " ").prefix(600))")
-                        print("[NCDEBUG] respHeaders=\(headers.prefix(400))")
-                    }
-                    continuation.resume(returning: (data, headers, code))
-                } catch {
-                    continuation.resume(throwing: error)
-                }
-            }
-        }
+        let response = try await CurlTransport.request(method: method, url: url.absoluteString,
+                                                       headers: headers, body: body)
+        return (response.data, response.headers, response.statusCode)
     }
 
     /// 从 curl 的原始响应头文本(-D 输出, 含每一次重定向)里收 Set-Cookie。
     private func absorbSetCookies(fromRawHeaders raw: String) {
         var lines: [String] = []
-        for line in raw.split(separator: "\n") {
+        for line in raw.components(separatedBy: .newlines) {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.lowercased().hasPrefix("set-cookie:") {
                 lines.append(String(trimmed.dropFirst("set-cookie:".count)))
@@ -148,10 +109,10 @@ public final class NCClient {
             guard !name.isEmpty else { continue }
             let isDeletion = line.contains("Max-Age=0") || line.contains("max-age=0")
             if isDeletion {
-                cookies.removeValue(forKey: name)
+                storedCookies.removeValue(forKey: name)
                 captured.append("\(name)≠(删除)")
             } else {
-                cookies[name] = value
+                storedCookies[name] = value
                 captured.append(name)
             }
         }
@@ -180,11 +141,7 @@ public final class NCClient {
             print("[NCDEBUG] POST \(url) → HTTP \(statusCode)\n[NCDEBUG] body: \(String(data: data.prefix(300), encoding: .utf8) ?? "(空)")")
         }
         absorbSetCookies(fromRawHeaders: rawHeaders)
-        lastResponseHeaders = rawHeaders
         NCLog.log("POST \(url.path) → HTTP \(statusCode) 长度=\(data.count)\(data.isEmpty ? " (空响应)" : "")")
-        if !data.isEmpty, data.count < 2000, let text = String(data: data, encoding: .utf8) {
-            NCLog.log("  body: \(text)")
-        }
         if cookies["MUSIC_U"] != nil {
             NCLog.log("★ 已持有 MUSIC_U 登录 Cookie")
         }
@@ -224,7 +181,7 @@ public final class NCClient {
                                   headers: headers, isLogin: isLogin)
         if json.isEmpty, !path.contains("qrcode/client/login") {
             // 一次性温和重试(风控空响应)
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            try await Task.sleep(nanoseconds: 2_000_000_000)
             let retry = try await post(url: url,
                                        form: ["params": params, "encSecKey": encSecKey],
                                        headers: headers, isLogin: isLogin)
@@ -284,7 +241,7 @@ public final class NCClient {
         if json.isEmpty { return 801 }   // 空响应 = 等待扫码
         let code = (json["code"] as? Int) ?? -1
         if code == 803 {
-            NCLog.log("  803 详细响应头: \(lastResponseHeaders)")
+            NCLog.log("  803 登录成功响应已收到")
             if cookies["MUSIC_U"] == nil {
                 // 有的实现 cookie 在紧随其后的再次轮询才下发
                 NCLog.log("  803 未携带 Cookie, 立即复查一次…")
@@ -294,9 +251,6 @@ public final class NCClient {
         }
         return code
     }
-
-    /// 最近一次响应的完整头(诊断用)。
-    private(set) var lastResponseHeaders: String = ""
 
     /// 校验登录态并取回用户信息。返回 nil 表示未登录/cookie 失效。
     public func account() async throws -> NCProfile? {

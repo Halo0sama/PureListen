@@ -9,8 +9,6 @@ public enum HTTPTask {
         public var statusCode: Int
     }
 
-    static let queue = DispatchQueue(label: "PureListen.httptask")
-
     public static func get(url: String, headers: [String: String] = [:],
                            timeout: Int = 20, followRedirects: Bool = true) async throws -> Response {
         try await request(method: "GET", url: url, headers: headers, body: nil,
@@ -26,60 +24,21 @@ public enum HTTPTask {
     private static func request(method: String, url: String, headers: [String: String],
                                 body: String?, timeout: Int,
                                 followRedirects: Bool = true) async throws -> Response {
-        let tmp = NSTemporaryDirectory() + UUID().uuidString
-        let headerFile = tmp + ".h", dataFile = tmp + ".d", bodyFile = tmp + ".b"
-        defer {
-            for f in [headerFile, dataFile, bodyFile] { try? FileManager.default.removeItem(atPath: f) }
+        let response = try await CurlTransport.request(method: method, url: url, headers: headers,
+                                                       body: body, timeout: timeout,
+                                                       followRedirects: followRedirects)
+        var cookies: [String: String] = [:]
+        for line in response.headers.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.lowercased().hasPrefix("set-cookie:") else { continue }
+            let pair = trimmed.dropFirst("set-cookie:".count).split(separator: ";", maxSplits: 1).first ?? ""
+            guard let eq = pair.firstIndex(of: "=") else { continue }
+            let name = pair[..<eq].trimmingCharacters(in: .whitespaces)
+            let value = pair[pair.index(after: eq)...].trimmingCharacters(in: .whitespaces)
+            if !name.isEmpty { cookies[name] = value }
         }
-        if let body { try body.write(toFile: bodyFile, atomically: true, encoding: .utf8) }
-
-        var args = ["-s", "--compressed", "-m", String(timeout),
-                    "-D", headerFile, "-o", dataFile, "-w", "%{http_code}"]
-        if followRedirects { args.append("-L") }
-        for (k, v) in headers { args += ["-H", "\(k): \(v)"] }
-        if body != nil { args += ["--data-binary", "@\(bodyFile)"] }
-        if method != "GET" { args += ["-X", method] }
-        args.append(url)
-
-        return try await withCheckedThrowingContinuation { continuation in
-            queue.async {
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
-                process.arguments = args
-                process.standardOutput = Pipe()
-                process.standardError = Pipe()
-                do {
-                    try process.run()
-                    process.waitUntilExit()
-                    let outData = (process.standardOutput as? Pipe)?
-                        .fileHandleForReading.readDataToEndOfFile() ?? Data()
-                    let code = Int(String(data: outData, encoding: .utf8) ?? "0") ?? 0
-                    let rawHeaders = (try? String(contentsOfFile: headerFile, encoding: .utf8)) ?? ""
-                    let data = (try? Data(contentsOf: URL(fileURLWithPath: dataFile))) ?? Data()
-
-                    var cookies: [String: String] = [:]
-                    for line in rawHeaders.split(separator: "\n") {
-                        let trimmed = line.trimmingCharacters(in: .whitespaces)
-                        guard trimmed.lowercased().hasPrefix("set-cookie:") else { continue }
-                        let pair = String(trimmed.dropFirst("set-cookie:".count))
-                        let nameValue = pair.split(separator: ";", maxSplits: 1).first.map(String.init) ?? pair
-                        if let eq = nameValue.firstIndex(of: "=") {
-                            let name = String(nameValue[..<eq]).trimmingCharacters(in: .whitespaces)
-                            let value = String(nameValue[nameValue.index(after: eq)...]).trimmingCharacters(in: .whitespaces)
-                            if !name.isEmpty { cookies[name] = value }
-                        }
-                    }
-                    var json: [String: Any] = [:]
-                    if !data.isEmpty,
-                       let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                        json = obj
-                    }
-                    continuation.resume(returning: Response(json: json, setCookies: cookies, statusCode: code))
-                } catch {
-                    continuation.resume(throwing: error)
-                }
-            }
-        }
+        let json = (try? JSONSerialization.jsonObject(with: response.data)) as? [String: Any] ?? [:]
+        return Response(json: json, setCookies: cookies, statusCode: response.statusCode)
     }
 
     /// cookie 字典 → Cookie 头。

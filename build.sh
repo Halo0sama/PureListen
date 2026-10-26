@@ -27,11 +27,13 @@ sign_app() {
 echo "==> Release 构建"
 swift build -c release --product PureListen
 
-BIN=.build/out/Products/Release/PureListen
-APP=dist/净听.app
+BIN="$(swift build -c release --show-bin-path)/PureListen"
+mkdir -p dist
+PACKAGE_DIR="$(mktemp -d dist/.package.XXXXXX)"
+trap 'rm -rf "$PACKAGE_DIR"' EXIT
+APP="$PACKAGE_DIR/净听.app"
 
 echo "==> 组装 $APP"
-rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/PureListen"
 
@@ -83,14 +85,12 @@ PLIST
 echo "==> 签名"
 sign_app "$APP"
 
-# 自动同步: 用户已把 App 放进 /Applications 时, 保持它为最新版。
-# 只想检查构建产物、不想替换已安装版本时: PURELISTEN_NO_INSTALL=1 ./build.sh
-if [ -d "/Applications/净听.app" ] && [ "${PURELISTEN_NO_INSTALL:-0}" != "1" ]; then
-    echo "==> 同步最新版到 /Applications"
-    rm -rf "/Applications/净听.app"
-    cp -R "$APP" /Applications/
-    sign_app "/Applications/净听.app"
-fi
+codesign --verify --deep --strict "$APP"
+plutil -lint "$APP/Contents/Info.plist"
+# 签名与元数据均验证成功后才替换旧构建产物。安装由用户显式执行。
+rm -rf "dist/净听.app"
+mv "$APP" "dist/净听.app"
+APP="dist/净听.app"
 
 echo "==> 完成: $APP"
 echo "    安装: cp -r \"$APP\" /Applications/  然后双击运行(首次需在 Finder 里右键打开)"

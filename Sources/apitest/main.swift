@@ -20,6 +20,7 @@ let client = NCClient(cookies: loadCookies())
 let args = CommandLine.arguments
 let command = args.count > 1 ? args[1] : "qr"
 let semaphore = DispatchSemaphore(value: 0)
+var exitStatus: Int32 = 0
 
 Task {
     do {
@@ -79,6 +80,20 @@ Task {
                 print("  [\(t.id)] \(t.name) - \(t.artists) vip=\(t.vipOnly)")
             }
 
+        case "resolve":
+            guard args.count > 2, let (kind, value) = SourceResolver.classify(args[2]) else {
+                throw URLError(.badURL)
+            }
+            let items: [PlayableItem]
+            switch kind {
+            case "bilibili": items = try await SourceResolver.resolveBilibili(value)
+            case "netease": items = [try await SourceResolver.resolveNetease(id: Int(value)!, client: client, level: .lossless)]
+            case "direct": items = [SourceResolver.resolveDirect(value)]
+            default: throw URLError(.badURL)
+            }
+            print("来源: \(kind) · \(items.count) 个条目（仅解析，不下载或播放）")
+            for item in items.prefix(5) { print("  \(item.title) · \(item.artist) · \(item.format) · \(item.detail)") }
+
         case "hct":
             let resp = try await HTTPTask.get(url: "https://api.bilibili.com/x/frontend/finger/spi",
                                               headers: ["User-Agent": BiliClient.UA,
@@ -113,12 +128,15 @@ Task {
 
         default:
             print("未知命令: \(command)")
-            print("可用: qr | url <id> <level> | playlists | search <kw> | hct | biliqr")
+            exitStatus = 2
+            print("可用: qr | url <id> <level> | playlists | search <kw> | resolve <链接/BV/ID> | hct | biliqr")
         }
     } catch {
+        exitStatus = 1
         print("❌ 出错: \(error)")
     }
     semaphore.signal()
 }
 
 semaphore.wait()
+exit(exitStatus)

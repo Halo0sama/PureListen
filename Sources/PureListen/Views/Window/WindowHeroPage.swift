@@ -64,6 +64,7 @@ struct WindowHeroPage: View {
     }
 
     private var nextTrack: NCTrack? {
+        guard state.currentItem == nil else { return nil }
         let next = state.currentIndex + 1
         guard state.tracks.indices.contains(next) else { return nil }
         return state.tracks[next]

@@ -96,7 +96,7 @@ public final class BiliClient {
 
         // 成功: 完整记录响应结构, 多路径捕获 Cookie
         NCLog.log("B站登录成功响应 data 键: \(data?.keys.sorted().joined(separator: ",") ?? "无")")
-        NCLog.log("B站 data.url = \((data?["url"] as? String) ?? "(空)")")
+        NCLog.log("B站 crossDomain 地址存在: \(data?["url"] as? String != nil)")
         NCLog.log("B站 响应头Set-Cookie数: \(resp.setCookies.count)")
 
         // 0) 新版接口: data.cookie_info.cookies = [{name, value}]

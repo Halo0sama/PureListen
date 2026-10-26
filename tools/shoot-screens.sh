@@ -12,7 +12,7 @@ mkdir -p "$OUT"
 echo "==> 构建 Debug 版"
 swift build -c debug --product PureListen
 
-BIN=.build/debug/PureListen
+BIN="$(swift build -c debug --show-bin-path)/PureListen"
 
 # 唤醒显示器并保持常亮, 否则窗口截图会失败。
 caffeinate -u -t 2 || true

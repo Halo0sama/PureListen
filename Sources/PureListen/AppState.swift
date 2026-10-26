@@ -26,7 +26,12 @@ final class AppState: ObservableObject {
     @Published var trackStatus = ExclusivePlayer.TrackStatus()
     @Published var loadingHint = ""
 
-    @Published var level: NCLevel = .lossless
+    @Published var level: NCLevel = .lossless {
+        didSet { defaults.set(level.rawValue, forKey: "level") }
+    }
+    @Published var networkMode: NetworkMode = .system {
+        didSet { defaults.set(networkMode.rawValue, forKey: "networkMode") }
+    }
     @Published var volume: Float = 1.0 {
         didSet {
             player.volume = volume
@@ -97,21 +102,7 @@ final class AppState: ObservableObject {
 
     /// 播放收藏里的一个视频(自动解析音频)。
     func playBiliVideo(_ video: BiliClient.FavVideo) {
-        playerState = .loading("解析 B 站音频…")
-        quickPlayError = nil
-        Task {
-            do {
-                let items = try await SourceResolver.resolveBilibili(video.bvid, bili: biliClient)
-                // 用收藏夹条目的封面/UP主名(更准)
-                var first = items[0]
-                if first.coverURL.isEmpty { first.coverURL = video.cover }
-                itemQueue = items
-                play(item: first)
-            } catch {
-                playerState = .error(error.localizedDescription)
-                quickPlayError = error.localizedDescription
-            }
-        }
+        resolveAndPlay(video.bvid, coverFallback: video.cover)
     }
 
     // MARK: 搜索
@@ -163,6 +154,7 @@ final class AppState: ObservableObject {
     /// 用户会看到"开关明明是开的却反复弹授权"的骚扰。因此改成只在用户主动打开
     /// 「接管媒体键」开关时请求一次授权，其余时候只在设置页给一条可点击的提示。
     private func updateMediaKeyTap() {
+        guard !previewMode else { return }
         let need = playbackActive || mediaControlKeysEnabled
         let permitted = MediaKeyTap.hasPermission()
         mediaKeyTap.isEnabled = need && permitted
@@ -202,6 +194,7 @@ final class AppState: ObservableObject {
     }
 
     private func applyMutePolicy() {
+        guard !previewMode else { return }
         if muteSystemWhileRunning && playbackActive {
             if !SystemMute.isMuted() {
                 wasMutedBeforeUs = false
@@ -224,7 +217,7 @@ final class AppState: ObservableObject {
             defaults.set(mediaControlKeysEnabled, forKey: "mediaControlKeys")
             // 只有用户主动打开这个开关时才请求辅助功能授权（系统弹窗由用户操作触发）；
             // 从偏好恢复的状态不请求，避免每次启动都弹窗。
-            if !isRestoringState, mediaControlKeysEnabled, !MediaKeyTap.hasPermission() {
+            if !previewMode, !isRestoringState, mediaControlKeysEnabled, !MediaKeyTap.hasPermission() {
                 MediaKeyTap.requestPermission()
             }
             updateMediaKeyTap()
@@ -269,7 +262,7 @@ final class AppState: ObservableObject {
     @Published var systemVolumeMirror = true {
         didSet {
             defaults.set(systemVolumeMirror, forKey: "volumeMirror")
-            if systemVolumeMirror { volumeMirror.start() } else { volumeMirror.stop() }
+            if systemVolumeMirror && !previewMode { volumeMirror.start() } else { volumeMirror.stop() }
         }
     }
     let volumeMirror = VolumeMirror()
@@ -284,6 +277,13 @@ final class AppState: ObservableObject {
     private let previewMode: Bool
     private var qrKey: String?
     private var qrPollTask: Task<Void, Never>?
+    private(set) var playbackTask: Task<Void, Never>?
+    private var playbackRequestID = UUID()
+    private var lyricsTask: Task<Void, Never>?
+    /// 下载依赖可替换，便于验证乱序完成和取消，无需启动音频设备。
+    var downloadAudio: (String, String, [String: String]) async throws -> URL = { url, format, headers in
+        try await Downloader.ensureLocal(url: url, key: "", format: format, headers: headers)
+    }
 #if DEBUG
     /// 预览/截图用的假二维码内容(不发起网络请求)。
     fileprivate var previewLoginQRContent: String?
@@ -316,7 +316,7 @@ final class AppState: ObservableObject {
         autoDevice = !defaults.bool(forKey: "devicePinned")
         if !previewMode { setupHotplugListener() }
         biliMid = defaults.integer(forKey: "biliMid")
-        if biliClient.isLoggedIn {
+        if biliClient.isLoggedIn && !previewMode {
             biliPhase = .loggedIn
             Task {
                 if let account = try? await biliClient.account() {
@@ -330,8 +330,11 @@ final class AppState: ObservableObject {
             level = saved
         }
         // 安全默认: 10% 音量起步(位完美需要时用户自己拉满)
-        volume = Float(defaults.double(forKey: "volume") == 0 ? 0.1 : defaults.double(forKey: "volume"))
-        autoResume = defaults.bool(forKey: "autoResume")
+        let savedVolume = defaults.object(forKey: "volume") == nil ? 0.1 : defaults.double(forKey: "volume")
+        volume = savedVolume.isFinite ? Float(min(max(savedVolume, 0), 1)) : 0.1
+        player.volume = volume
+        networkMode = NetworkMode(rawValue: defaults.string(forKey: "networkMode") ?? "") ?? .system
+        autoResume = defaults.object(forKey: "autoResume") == nil ? true : defaults.bool(forKey: "autoResume")
         // 系统音量 → App 音量镜像(0.4s 轮询, 拖动滑条后 2 秒内不覆盖)
         volumeMirror.onSystemVolume = { [weak self] value in
             Task { @MainActor in
@@ -346,9 +349,8 @@ final class AppState: ObservableObject {
                 }
             }
         }
-        if !previewMode, defaults.object(forKey: "volumeMirror") == nil || defaults.bool(forKey: "volumeMirror") {
-            systemVolumeMirror = true   // 默认开启
-        }
+        systemVolumeMirror = defaults.object(forKey: "volumeMirror") == nil || defaults.bool(forKey: "volumeMirror")
+        if !previewMode && systemVolumeMirror { volumeMirror.start() }
         mediaKeyTap.onVolumeChange = { [weak self] delta in
             Task { @MainActor in
                 guard let self else { return }
@@ -381,7 +383,7 @@ final class AppState: ObservableObject {
 
         player.onStateChange = { [weak self] state in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self, self.playbackTask == nil else { return }
                 self.playerState = state
                 self.applyMutePolicy()
                 self.updateMediaKeyTap()
@@ -389,7 +391,7 @@ final class AppState: ObservableObject {
         }
         player.onTrackChange = { [weak self] status in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self, self.playbackTask == nil else { return }
                 self.trackStatus = status
                 if self.lyricIndex >= 0, self.lyricIndex < self.lyrics.count {
                     self.updateLyricIndex(position: status.positionSeconds)
@@ -399,7 +401,10 @@ final class AppState: ObservableObject {
             }
         }
         player.onTrackFinished = { [weak self] in
-            Task { @MainActor in self?.playNext(autoPlay: true) }
+            Task { @MainActor in
+                guard let self, self.playbackTask == nil else { return }
+                self.playNext(autoPlay: true)
+            }
         }
         if !previewMode { refreshDevices() }
         isRestoringState = false
@@ -433,6 +438,7 @@ final class AppState: ObservableObject {
     }
 
     func refreshDevices() {
+        guard !previewMode else { return }
         devices = AudioDevice.allDevices()
         let savedUID = defaults.string(forKey: "deviceUID")
         var chosen: AudioDeviceInfo?
@@ -449,8 +455,13 @@ final class AppState: ObservableObject {
         }
         if chosen == nil { chosen = AudioDevice.preferredOutput() }
         if let chosen {
+            if player.deviceID != chosen.id { player.stop() }
             selectedDevice = chosen
             player.deviceID = chosen.id
+        } else {
+            player.stop()
+            selectedDevice = nil
+            player.deviceID = 0
         }
     }
 
@@ -517,13 +528,17 @@ final class AppState: ObservableObject {
     }
 
     func selectDevice(_ device: AudioDeviceInfo) {
+        let resumeAt = trackStatus.positionSeconds
+        player.stop() // 先释放旧设备，再更新引擎的目标 ID。
         autoDevice = false
         selectedDevice = device
         player.deviceID = device.id
         defaults.set(device.uid, forKey: "deviceUID")
-        // 切设备后重播当前曲目
-        if currentIndex >= 0, tracks.indices.contains(currentIndex) {
-            play(index: currentIndex)
+        // 网易、B站与直链都在新设备上从原进度继续。
+        if let item = currentItem {
+            play(item: item, resumeAt: resumeAt)
+        } else if currentIndex >= 0, tracks.indices.contains(currentIndex) {
+            play(index: currentIndex, resumeAt: resumeAt)
         }
     }
 
@@ -655,7 +670,10 @@ final class AppState: ObservableObject {
     }
 
     func logout() {
+        cancelPendingPlayback()
         player.stop()
+        currentItem = nil
+        itemQueue = []
         defaults.removeObject(forKey: "cookies")
         profile = nil
         playlists = []
@@ -680,41 +698,68 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func cancelPendingPlayback() {
+        playbackRequestID = UUID()
+        playbackTask?.cancel()
+        playbackTask = nil
+        lyricsTask?.cancel()
+        quickPlayBusy = false
+    }
+
+    private func beginPlaybackRequest() -> UUID {
+        cancelPendingPlayback()
+        player.stop()
+        loadingHint = ""
+        return playbackRequestID
+    }
+
+    private func isCurrentPlayback(_ id: UUID) -> Bool {
+        id == playbackRequestID && !Task.isCancelled
+    }
+
+    private func finishPlaybackRequest(_ id: UUID) {
+        guard id == playbackRequestID else { return }
+        playbackTask = nil
+        quickPlayBusy = false
+    }
+
     func play(index: Int, resumeAt: Double? = nil) {
         guard tracks.indices.contains(index) else { return }
+        let requestID = beginPlaybackRequest()
         currentItem = nil
+        itemQueue = []
         currentIndex = index
         let track = tracks[index]
         fetchLyrics(for: track)
         playerState = .loading("取链中…")
-        Task {
+        playbackTask = Task {
+            defer { finishPlaybackRequest(requestID) }
             do {
+                try Task.checkCancellation()
                 var result = try await client.songURL(id: track.id, level: level)
-                if result == nil {
+                guard isCurrentPlayback(requestID) else { return }
+                if result?.url?.isEmpty != false {
                     result = try await client.songURLFallback(id: track.id, level: level)
                 }
+                guard isCurrentPlayback(requestID) else { return }
                 guard let result, let url = result.url, !url.isEmpty else {
                     playerState = .error("取不到音源(无版权或需 VIP)")
                     return
                 }
-                if let trial = result.freeTrialInfo {
-                    loadingHint = trial
-                }
+                if let trial = result.freeTrialInfo { loadingHint = trial }
                 playerState = .loading("下载 \(result.format.uppercased()) …")
-                let local = try await Downloader.ensureLocal(url: url,
-                                                              key: url.md5Prefix,
-                                                              format: result.format)
-                guard currentIndex == index else { return }   // 已切歌
+                let local = try await downloadAudio(url, result.format, [:])
+                guard isCurrentPlayback(requestID), tracks.indices.contains(index),
+                      tracks[index].id == track.id else { return }
                 var status = ExclusivePlayer.TrackStatus()
                 status.title = track.name
                 status.artist = track.artists
                 status.format = result.format
                 status.level = result.level
                 player.playFile(url: local, metadata: status)
-                if let resumeAt, resumeAt > 0.5 {
-                    player.seek(to: resumeAt)
-                }
+                if let resumeAt, resumeAt > 0.5 { player.seek(to: resumeAt) }
             } catch {
+                guard isCurrentPlayback(requestID) else { return }
                 playerState = .error("播放失败: \(error.localizedDescription)")
             }
         }
@@ -722,64 +767,64 @@ final class AppState: ObservableObject {
 
     /// 播放一个已解析好的条目(网易/B站/直链)。
     func play(item: PlayableItem, resumeAt: Double? = nil) {
+        let requestID = beginPlaybackRequest()
         currentItem = item
+        if !itemQueue.contains(where: { $0.id == item.id }) { itemQueue = [item] }
+        currentIndex = -1
         lyrics = []
         lyricIndex = -1
         playerState = .loading("取链完成, 下载中…")
-        Task {
+        playbackTask = Task {
+            defer { finishPlaybackRequest(requestID) }
             do {
-                let key = item.downloadURL.md5PrefixSafe
-                let local = try await Downloader.ensureLocal(url: item.downloadURL, key: key,
-                                                              format: item.format,
-                                                              headers: item.headers)
+                try Task.checkCancellation()
+                let local = try await downloadAudio(item.downloadURL, item.format, item.headers)
+                guard isCurrentPlayback(requestID) else { return }
                 var status = ExclusivePlayer.TrackStatus()
                 status.title = item.title
                 status.artist = item.artist
                 status.format = item.format
                 status.level = item.source.rawValue
                 player.playFile(url: local, metadata: status)
-                if let resumeAt, resumeAt > 0.5 {
-                    player.seek(to: resumeAt)
-                }
+                if let resumeAt, resumeAt > 0.5 { player.seek(to: resumeAt) }
             } catch {
+                guard isCurrentPlayback(requestID) else { return }
                 playerState = .error("播放失败: \(error.localizedDescription)")
             }
         }
     }
 
-    /// 解析用户输入并播放(支持 网易ID/歌曲链接、B站BV/av/链接/b23短链、音频直链)。
-    func resolveAndPlay(_ input: String) {
+    /// 解析与下载共享请求身份；新的操作会取消旧的解析和下载。
+    func resolveAndPlay(_ input: String, coverFallback: String = "") {
         quickPlayError = nil
         guard let (kind, value) = SourceResolver.classify(input) else {
             quickPlayError = "无法识别: 支持网易云歌曲链接/ID、B站链接/BV号、音频直链"
             return
         }
+        let requestID = beginPlaybackRequest()
         quickPlayBusy = true
         playerState = .loading("解析来源…")
-        Task {
-            defer { quickPlayBusy = false }
+        playbackTask = Task {
+            defer { finishPlaybackRequest(requestID) }
             do {
+                try Task.checkCancellation()
+                var items: [PlayableItem]
                 switch kind {
                 case "netease":
-                    if let id = Int(value) {
-                        let item = try await SourceResolver.resolveNetease(id: id, client: client, level: level)
-                        itemQueue = [item]
-                        play(item: item)
-                    } else {
-                        quickPlayError = "网易链接里没找到歌曲 ID"
-                    }
+                    guard let id = Int(value) else { throw URLError(.badURL) }
+                    items = [try await SourceResolver.resolveNetease(id: id, client: client, level: level)]
                 case "bilibili":
-                    let items = try await SourceResolver.resolveBilibili(value, bili: biliClient)
-                    itemQueue = items
-                    play(item: items[0])
+                    items = try await SourceResolver.resolveBilibili(value, bili: biliClient)
                 case "direct":
-                    let item = SourceResolver.resolveDirect(value)
-                    itemQueue = [item]
-                    play(item: item)
-                default:
-                    quickPlayError = "未知来源"
+                    items = [SourceResolver.resolveDirect(value)]
+                default: throw URLError(.badURL)
                 }
+                guard isCurrentPlayback(requestID), !items.isEmpty else { return }
+                if items[0].coverURL.isEmpty { items[0].coverURL = coverFallback }
+                itemQueue = items
+                play(item: items[0])
             } catch {
+                guard isCurrentPlayback(requestID) else { return }
                 playerState = .error(error.localizedDescription)
                 quickPlayError = error.localizedDescription
             }
@@ -787,28 +832,40 @@ final class AppState: ObservableObject {
     }
 
     func playNext(autoPlay: Bool = true) {
+        if let item = currentItem {
+            guard let index = itemQueue.firstIndex(where: { $0.id == item.id }) else { return }
+            if itemQueue.indices.contains(index + 1) { play(item: itemQueue[index + 1]) }
+            else if autoPlay { cancelPendingPlayback(); player.stop() }
+            return
+        }
         guard !tracks.isEmpty else { return }
         let next = currentIndex + 1
-        if next < tracks.count {
-            play(index: next)
-        } else if autoPlay {
-            player.stop()
-        }
+        if next < tracks.count { play(index: next) }
+        else if autoPlay { cancelPendingPlayback(); player.stop() }
     }
+
     func playPause() {
         switch playerState {
         case .playing: player.pause()
         case .paused: player.resume()
+        case .loading:
+            cancelPendingPlayback()
+            player.stop()
+            playerState = .idle
         default:
-            if currentIndex < 0, !tracks.isEmpty { play(index: 0) }
+            if let item = currentItem { play(item: item) }
+            else if !tracks.isEmpty { play(index: max(currentIndex, 0)) }
         }
     }
 
-
     func playPrevious() {
+        if let item = currentItem {
+            guard let index = itemQueue.firstIndex(where: { $0.id == item.id }) else { return }
+            play(item: itemQueue[max(index - 1, 0)])
+            return
+        }
         guard !tracks.isEmpty else { return }
-        let prev = currentIndex - 1
-        if prev >= 0 { play(index: prev) } else { play(index: 0) }
+        play(index: max(currentIndex - 1, 0))
     }
 
     // MARK: - B站登录
@@ -910,11 +967,14 @@ final class AppState: ObservableObject {
     // MARK: - 歌词
 
     func fetchLyrics(for track: NCTrack) {
+        lyricsTask?.cancel()
         lyrics = []
         lyricIndex = -1
         guard track.id != 0 else { return }
-        Task {
-            guard let result = try? await client.lyrics(id: track.id) else { return }
+        lyricsTask = Task {
+            guard let result = try? await client.lyrics(id: track.id), !Task.isCancelled,
+                  currentItem == nil, tracks.indices.contains(currentIndex),
+                  tracks[currentIndex].id == track.id else { return }
             parseLyrics(result.lrc, translation: result.tlyric)
         }
     }
@@ -988,33 +1048,17 @@ final class AppState: ObservableObject {
     }
 
     func shutdown() {
+        cancelPendingPlayback()
         qrPollTask?.cancel()
+        biliPollTask?.cancel()
+        hotplugDebounceTask?.cancel()
+        stopPermissionPolling()
+        volumeMirror.stop()
+        mediaKeyTap.isEnabled = false
         player.shutdown()
         if weMutedSystem, !wasMutedBeforeUs {
             SystemMute.setMuted(false)   // 退出时还原系统声音
         }
-    }
-}
-
-private extension String {
-    /// 用直链路径里的文件名(md5)做缓存 key; 必须剥离查询串(vuutv 里含斜杠且每次变化)。
-    var md5Prefix: String {
-        guard let comps = URLComponents(string: self),
-              let last = comps.path.split(separator: "/").last,
-              let name = String(last).split(separator: ".").first, !name.isEmpty else {
-            return UUID().uuidString
-        }
-        return String(name)
-    }
-
-    /// 任意直链的安全缓存 key(路径名优先, 兜底 URL 哈希)。
-    var md5PrefixSafe: String {
-        if let comps = URLComponents(string: self),
-           let last = comps.path.split(separator: "/").last,
-           let name = String(last).split(separator: ".").first, !name.isEmpty, name.count <= 128 {
-            return String(name)
-        }
-        return String(abs(hashValue))
     }
 }
 

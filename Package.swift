@@ -24,6 +24,8 @@ let package = Package(
             dependencies: ["PureListenCore"],
             path: "Sources/apitest"
         ),
+        .testTarget(name: "PureListenCoreTests", dependencies: ["PureListenCore"]),
+        .testTarget(name: "PureListenTests", dependencies: ["PureListen", "PureListenCore"]),
     ],
     swiftLanguageModes: [.v5]
 )

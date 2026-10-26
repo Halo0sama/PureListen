@@ -29,6 +29,7 @@ struct SettingsView: View {
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: metrics.sectionSpacing) {
                     qualitySection.id("settings-quality")
+                    networkSection.id("settings-network")
                     outputSection.id("settings-output")
                     protectionSection.id("settings-protection")
                     biliSection.id("settings-bili")
@@ -119,6 +120,22 @@ struct SettingsView: View {
             return "320kbps 有损音源，网络受限时使用。"
         case .standard:
             return "128kbps 有损音源，仅在网络极差时使用。"
+        }
+    }
+
+    private var networkSection: some View {
+        SettingsSection(title: "网络", metrics: metrics) {
+            SettingsRow(title: "连接方式", subtitle: "VPN 用户建议跟随系统代理；更改后对新请求生效", metrics: metrics) {
+                Picker("连接方式", selection: $state.networkMode) {
+                    ForEach(NetworkMode.allCases, id: \.self) { mode in
+                        Text(mode.label).tag(mode)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .controlSize(.small)
+                .fixedSize()
+            }
         }
     }
 

@@ -1,6 +1,6 @@
 # 稳定代码签名（开发用）
 
-净听默认用 ad-hoc 签名（`codesign --sign -`）。这在 macOS 上带来一个副作用：
+净听构建时优先使用 `PureListen Dev` 稳定签名，找不到该身份才回退到 ad-hoc（`codesign --sign -`）。ad-hoc 在 macOS 上带来一个副作用：
 
 - 每次重新构建，二进制的 **cdhash** 都会变化；
 - 「隐私与安全性 → 辅助功能」等 TCC 授权记录的是**签名要求**（designated requirement）；
@@ -39,7 +39,7 @@ PURELISTEN_SIGN_IDENTITY="My Cert" ./build.sh
 
 签名要求变了，**需要重新授权一次**（之后 rebuild 不再丢）：
 
-1. 重新 `./build.sh` 安装新版；
+1. 重新 `./build.sh` 生成新版，再手动复制 `dist/净听.app` 到 `/Applications`；
 2. 净听 → 设置 → 播放保护 → 点「去授权」；
 3. 系统设置 → 隐私与安全性 → 辅助功能 → 把「净听」**关掉再打开**；
 4. 回到净听，几秒内自动接管媒体键（App 内会静默轮询权限变化）。

@@ -59,7 +59,7 @@ macOS 会把所有 App 的音频混在一起, 统一重采样 (SRC) 后输出。
 ## 使用
 
 ```bash
-./build.sh          # 构建并打包（Release + 组装 .app + ad-hoc 签名）
+./build.sh          # 只构建并打包，优先稳定签名；不自动替换已安装应用
 cp -r "dist/净听.app" /Applications/
 ```
 
@@ -75,12 +75,21 @@ cp -r "dist/净听.app" /Applications/
 
 ```bash
 swift build -c debug --product PureListen
+BIN="$(swift build -c debug --show-bin-path)"
 caffeinate -u -t 2
-.build/debug/PureListen --ui-studio --out docs/design/screens            # 全部场景, dark + light
-.build/debug/PureListen --ui-studio --out /tmp/shots --only window       # 只看主窗口
+"$BIN/PureListen" --ui-studio --out docs/design/screens                 # 全部场景, dark + light
+"$BIN/PureListen" --ui-studio --out /tmp/shots --only window            # 只看主窗口
 ```
 
 `--ui-studio` 用假 `AppState`（不枚举音频设备、不联网、不启轮询）把真实的 `NSPopover` / `NSWindow` 渲染出来再抓图，因此整个设计验证过程不会发出任何声音。也可以直接运行 `tools/shoot-screens.sh` 一键重出全部截图。
+
+## 网络与 VPN
+
+设置 → 网络 → 连接方式默认是「跟随系统代理」。API 请求读取系统 HTTP(S)/SOCKS 代理；终端启动时也遵循 `https_proxy` / `all_proxy` 与 `NO_PROXY` 等环境变量。音频下载使用系统网络设置，不再强制绕过代理。TUN 模式的路由仍由 VPN 本身控制。
+
+「直接连接」会让新发起的 API 与下载请求忽略应用层代理。切换不会迁移已经开始的请求，可重新点播使其生效。API 暂不支持 PAC 自动代理，会提示改用系统 HTTP(S)/SOCKS 代理。
+
+缓存文件使用完整 URL 与请求头的 SHA-256 标识，防止同名音源串用。旧缓存保留，首次播放会建立新版缓存；签名 URL 改变也会产生新缓存，可在设置中清理。
 
 ## 说明与限制
 
@@ -110,18 +119,24 @@ Resources/AppIcon.icns       应用图标 (macOS 27 分层玻璃风格)
 docs/design/                 视觉规范、设计说明、截图、图标源文件
 docs/research/               macOS 27 设计语言研究 + SDK API 速查
 tools/shoot-screens.sh       一键重出界面截图
-build.sh                     Release 构建 + 组装 .app + ad-hoc 签名
+build.sh                     Release 构建 + 组装 .app + 签名与完整性验证
 ```
 
 ## 自测
 
 ```bash
-.build/out/Products/Debug/hogtest              # 独占播放 88.2kHz 测试音并恢复现场 ⚠️ 会出声
-.build/out/Products/Debug/apitest qr           # 走一遍扫码登录链路
-.build/out/Products/Debug/apitest url <歌曲id> # 验证 eapi 取直链
+swift test                                      # 无声音、离线回归测试
+swift build                                     # 构建 App 与诊断 CLI
+BIN="$(swift build -c debug --show-bin-path)"
+"$BIN/apitest" hct                               # B站公开 API 连通性，不登录
+"$BIN/apitest" qr                                # 扫码登录链路
+"$BIN/apitest" url <歌曲id>                        # eapi 取直链
+"$BIN/hogtest"                                   # 独占链路测试；会出声并临时接管设备
 ```
 
-> 注意: `hogtest` 会实际播放测试音。界面相关的验证请用上面的 `--ui-studio` 截图模式, 它完全静音。
+回归测试覆盖系统代理策略、HTTP 超时/取消/重定向、并发下载与缓存失败、分享链接识别，以及快速切歌和分 P 队列。使用本机临时 HTTP 服务、独立缓存目录与隔离偏好；不依赖外网、登录账号或真实音频输出。
+
+开发接管记录、验证结果与待处理问题见 [docs/development.md](docs/development.md)。
 
 ## 开源
 

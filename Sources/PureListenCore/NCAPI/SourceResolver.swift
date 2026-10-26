@@ -35,48 +35,69 @@ public struct PlayableItem: Identifiable, Equatable {
 public enum SourceResolver {
     static let browserUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0"
 
-    public static func isDirectAudioURL(_ text: String) -> Bool {
-        guard text.hasPrefix("http://") || text.hasPrefix("https://") else { return false }
-        let lower = text.lowercased()
-        if text.contains("music.163.com") || text.contains("bilibili.com") || text.contains("b23.tv") {
-            return false
-        }
-        return [".flac", ".mp3", ".m4a", ".wav", ".aac", ".ogg", ".ape", ".aiff"].contains {
-            lower.contains($0)
-        }
+    private static let audioExtensions = ["flac", "mp3", "m4a", "wav", "aac", "ogg", "ape", "aiff"]
+
+    private static func matchesHost(_ host: String, domain: String) -> Bool {
+        host == domain || host.hasSuffix("." + domain)
     }
 
-    /// 解析输入文本; 返回 nil 表示无法识别。
+    /// 从分享文案中提取链接；直接粘贴的 URL 保留完整签名参数。
+    static func inputURL(_ raw: String) -> URL? {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let candidate: String
+        if !text.contains(where: { $0.isWhitespace }), let url = URL(string: text),
+           ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
+            candidate = text
+        } else {
+            guard let range = text.range(of: #"https?://[^\s<>"「」]+"#, options: .regularExpression) else { return nil }
+            candidate = String(text[range]).trimmingCharacters(in: CharacterSet(charactersIn: "，。！；）】>"))
+        }
+        guard let url = URL(string: candidate), url.host != nil,
+              ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return nil }
+        return url
+    }
+
+    public static func isDirectAudioURL(_ text: String) -> Bool {
+        guard let url = inputURL(text) else { return false }
+        let host = url.host?.lowercased() ?? ""
+        guard !matchesHost(host, domain: "music.163.com"),
+              !matchesHost(host, domain: "bilibili.com"), !matchesHost(host, domain: "b23.tv") else { return false }
+        return audioExtensions.contains(url.pathExtension.lowercased())
+    }
+
+    static func bilibiliIdentifier(in text: String) -> String? {
+        if let range = text.range(of: #"(?<![0-9A-Za-z])BV[0-9A-Za-z]{10}(?![0-9A-Za-z])"#, options: .regularExpression) {
+            return String(text[range])
+        }
+        if let range = text.range(of: #"(?i)(?<![0-9A-Za-z])av[1-9][0-9]*(?![0-9A-Za-z])"#, options: .regularExpression) {
+            return String(text[range]).lowercased()
+        }
+        return nil
+    }
+
+    /// 解析输入文本；仅对真实站点识别站内链接。
     public static func classify(_ raw: String) -> (kind: String, value: String)? {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return nil }
-
-        // 网易: song?id=123 或纯数字
-        if let range = text.range(of: "song?id="), let url = URL(string: text),
-           let components = URLComponents(url: url, resolvingAgainstBaseURL: false) {
-            if let id = components.queryItems?.first(where: { $0.name == "id" })?.value {
-                return ("netease", id)
+        if let n = Int(text), (1...9_999_999_999).contains(n) { return ("netease", String(n)) }
+        if let url = inputURL(text) {
+            let host = url.host?.lowercased() ?? ""
+            if matchesHost(host, domain: "music.163.com") {
+                let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+                let fragment = components?.fragment.flatMap { URLComponents(string: $0) }
+                let song = fragment?.path == "/song" || fragment?.path == "song" ? fragment : components
+                guard song?.path == "/song" || song?.path == "song",
+                      let value = song?.queryItems?.first(where: { $0.name == "id" })?.value,
+                      let id = Int(value), id > 0 else { return nil }
+                return ("netease", String(id))
             }
+            if matchesHost(host, domain: "bilibili.com") || matchesHost(host, domain: "b23.tv") {
+                return ("bilibili", url.absoluteString)
+            }
+            if isDirectAudioURL(url.absoluteString) { return ("direct", url.absoluteString) }
+            return nil
         }
-        if let n = Int(text), (1...9_999_999_999).contains(n) {
-            return ("netease", String(n))
-        }
-        if text.hasPrefix("http") && text.contains("163.com") {
-            return ("netease", text)   // 交给调用方展开
-        }
-
-        // B站: BV号 / av号 / 链接
-        if text.hasPrefix("BV") && text.count >= 10 { return ("bilibili", text) }
-        if text.lowercased().hasPrefix("av"), let av = Int(text.dropFirst(2)) {
-            return ("bilibili", "av\(av)")
-        }
-        if text.contains("bilibili.com") || text.contains("b23.tv") {
-            return ("bilibili", text)
-        }
-
-        // 直链音频
-        if isDirectAudioURL(text) { return ("direct", text) }
-
+        if let identifier = bilibiliIdentifier(in: text) { return ("bilibili", identifier) }
         return nil
     }
 
@@ -85,7 +106,7 @@ public enum SourceResolver {
     public static func resolveNetease(id: Int, client: NCClient, level: NCLevel) async throws -> PlayableItem {
         let detail = try await client.songDetail(id: id)
         var url = try await client.songURL(id: id, level: level)
-        if url == nil {
+        if url?.url?.isEmpty != false {
             url = try await client.songURLFallback(id: id, level: level)
         }
         guard let url, let link = url.url, !link.isEmpty else {
@@ -117,19 +138,9 @@ public enum SourceResolver {
     }
 
     /// 展开短链(b23.tv)获取 BV 号。
-    static func expandShortLink(_ url: String) async -> String {
-        guard url.contains("b23.tv") else { return url }
-        let curl = Process()
-        curl.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
-        curl.arguments = ["-s", "-o", "/dev/null", "-w", "%{url_effective}", "-L", "-m", "15", url,
-                          "-A", browserUA]
-        let pipe = Pipe()
-        curl.standardOutput = pipe
-        curl.standardError = Pipe()
-        try? curl.run()
-        curl.waitUntilExit()
-        let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        return out.isEmpty ? url : out
+    static func expandShortLink(_ url: String) async throws -> String {
+        let response = try await CurlTransport.request(url: url, headers: ["User-Agent": browserUA], timeout: 15)
+        return response.effectiveURL
     }
 
     public static func resolveBilibili(_ input: String, pageIndex: Int? = nil,
@@ -138,20 +149,16 @@ public enum SourceResolver {
         if let bili, bili.isLoggedIn {
             headers["Cookie"] = HTTPTask.cookieHeader(bili.cookies)
         }
-        var text = input
-        if text.contains("b23.tv") {
-            text = await expandShortLink(text)
+        var text = inputURL(input)?.absoluteString ?? input
+        if let host = URL(string: text)?.host?.lowercased(), matchesHost(host, domain: "b23.tv") {
+            text = try await expandShortLink(text)
         }
-        // 提取 BV 号或 av 号
-        var bvid: String?
-        if let r = text.range(of: "BV[0-9A-Za-z]{10}") { bvid = String(text[r]) }
-        else if let r = text.range(of: "av[0-9]+", options: .caseInsensitive) {
-            bvid = String(text[r].lowercased())
-        } else if text.hasPrefix("BV") { bvid = text }
-        guard let bv = bvid else {
+        guard let bv = bilibiliIdentifier(in: URL(string: text)?.path ?? text) else {
             throw NSError(domain: "Bili", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "未识别到 BV/av 号"])
         }
+        let requestedPage = pageIndex ?? URLComponents(string: text)?.queryItems?
+            .first(where: { $0.name == "p" })?.value.flatMap(Int.init)
         let query = bv.hasPrefix("av")
             ? "aid=\(bv.dropFirst(2))"
             : "bvid=\(bv)"
@@ -175,9 +182,13 @@ public enum SourceResolver {
         }
         if pages.isEmpty { pages = [BiliPage(cid: cid, part: "")] }
 
+        if let requestedPage, !(1...pages.count).contains(requestedPage) {
+            throw NSError(domain: "Bili", code: 4, userInfo: [NSLocalizedDescriptionKey: "分 P 编号超出范围"])
+        }
         var items: [PlayableItem] = []
         for (index, page) in pages.enumerated() {
-            if let pageIndex, index != pageIndex - 1 { continue }
+            try Task.checkCancellation()
+            if let requestedPage, index != requestedPage - 1 { continue }
             let play = try await httpGetJSON(
                 "https://api.bilibili.com/x/player/playurl?\(query)&cid=\(page.cid)&fnval=16&qn=64&try_look=1",
                 headers: headers)
@@ -204,13 +215,12 @@ public enum SourceResolver {
                 quality = "mp4"
             }
             guard let audioURL else { continue }
-            let suffix = audioURL.contains(".m4a") ? "m4a" : "m4a"
             items.append(PlayableItem(
                 title: title,
                 artist: owner,
                 source: .bilibili,
                 downloadURL: audioURL,
-                format: suffix,
+                format: quality == "mp4" ? "mp4" : "m4a",
                 headers: headers,
                 coverURL: pic,
                 detail: (page.part.isEmpty ? "" : page.part + " · ") + quality + " · DASH音频"))
@@ -225,12 +235,10 @@ public enum SourceResolver {
     // MARK: - 直链
 
     public static func resolveDirect(_ url: String) -> PlayableItem {
-        let lower = url.lowercased()
-        var format = "mp3"
-        for ext in ["flac", "m4a", "wav", "aac", "ogg", "ape", "aiff", "mp3"] {
-            if lower.contains(".\(ext)") { format = ext; break }
-        }
-        let name = url.split(separator: "/").last.map(String.init) ?? url
+        let source = URL(string: url)
+        let ext = source?.pathExtension.lowercased() ?? ""
+        let format = audioExtensions.contains(ext) ? ext : "mp3"
+        let name = source?.lastPathComponent ?? url
         return PlayableItem(title: name, artist: "直链",
                             source: .direct, downloadURL: url, format: format)
     }
