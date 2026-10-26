@@ -72,3 +72,9 @@ B站的上下曲及自然播完现在沿当前分 P 队列移动，结束时释�
 - [Apple：URLSession 的系统代理与下载接口](https://developer.apple.com/documentation/foundation/urlsession)
 - [Apple：connectionProxyDictionary 默认使用系统设置](https://developer.apple.com/documentation/foundation/urlsessionconfiguration/connectionproxydictionary)
 - [Apple：系统 HTTP 代理开关](https://developer.apple.com/documentation/cfnetwork/kcfnetworkproxieshttpenable)
+
+## 后续修复：播放栏外的黑影
+
+用户反馈浅色模式下，浮动播放栏外有大块黑色阴影。处理了两个来源：关闭播放栏额外叠加的黑色投影并按圆角裁切玻璃效果；将外观环境传递给背景和内容，使浅色的 AlbumWash 不再误用默认深色底部遮罩。
+
+同时修正预览锚点重复挂载 SwiftUI 内容的问题，避免截图在透明窗口后面再渲染一份界面。已逐轮查看歌单页浅色、深色的真实 NSPopover 截图，并检查设置页；产物与截图记录在 `dist/verification/transport-shadow/`。本次为视觉修复，采用 Debug/Release 构建和截图核对验证，没有新增或重复运行音频测试。

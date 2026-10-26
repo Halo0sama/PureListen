@@ -312,9 +312,10 @@ extension View {
     /// Liquid Glass 底座: 浮在内容之上的控制层。Reduce Transparency 时退化为实体表面。
     @ViewBuilder
     func dsGlass<S: InsettableShape>(in shape: S, tint: Color? = nil, interactive: Bool = false,
-                           fallbackFill: Color = DS.Palette.surfaceSelected) -> some View {
+                           fallbackFill: Color = DS.Palette.surfaceSelected,
+                           castsShadow: Bool = true) -> some View {
         modifier(DSGlassModifier(shape: shape, tint: tint, interactive: interactive,
-                                 fallbackFill: fallbackFill))
+                                 fallbackFill: fallbackFill, castsShadow: castsShadow))
     }
 
     /// 悬停高亮(自绘, 不动画布局, 只淡入淡出)。
@@ -355,6 +356,7 @@ private struct DSGlassModifier<S: InsettableShape>: ViewModifier {
     var tint: Color?
     var interactive: Bool
     var fallbackFill: Color
+    var castsShadow: Bool
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     func body(content: Content) -> some View {
@@ -395,8 +397,8 @@ private struct DSGlassModifier<S: InsettableShape>: ViewModifier {
                                        startPoint: .top, endPoint: .bottom),
                         lineWidth: 0.9)
                 }
-                .shadow(color: .black.opacity(0.45), radius: 0.7)
-                .shadow(color: .black.opacity(0.32), radius: 18, y: 8)
+                .shadow(color: castsShadow ? .black.opacity(0.45) : .clear, radius: 0.7)
+                .shadow(color: castsShadow ? .black.opacity(0.32) : .clear, radius: 18, y: 8)
         }
     }
 

@@ -21,7 +21,10 @@ struct PopoverTransport: View {
         .padding(.top, 7)
         .padding(.bottom, 7)
         .dsGlass(in: RoundedRectangle(cornerRadius: 20, style: .continuous),
-                 fallbackFill: DS.Palette.canvasElevated.opacity(0.96))
+                 fallbackFill: DS.Palette.canvasElevated.opacity(0.96),
+                 castsShadow: false)
+        // 玻璃层的系统投影也限制在播放栏内，避免盖黑两侧与底部的列表。
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 
     // MARK: 进度

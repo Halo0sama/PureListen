@@ -357,8 +357,9 @@ struct AlbumTintProvider<Content: View>: View {
             }
             content()
                 .environment(\.albumTint, tint)
-                .environment(\.dsIsDark, scheme == .dark)
         }
+        // 背景与内容共用外观；否则 AlbumWash 会一直使用默认的深色底部遮罩。
+        .environment(\.dsIsDark, scheme == .dark)
         .task(id: url) {
             let loaded = await AlbumPaletteStore.shared.palette(for: url)
             withAnimation(.easeOut(duration: 0.5)) { palette = loaded }

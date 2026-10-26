@@ -109,10 +109,9 @@ enum UIPreviewStudio {
         anchor.alphaValue = 0.01
         anchor.setFrameOrigin(scene.anchor ?? NSPoint(x: 1040, y: 792))
 
-        let host = NSHostingView(rootView: view)
-        host.frame = NSRect(origin: .zero, size: size)
-
-        anchor.contentView = host
+        // 锚点只负责定位；重复挂载 SwiftUI 内容会让透明窗口在玻璃背后再画一份界面。
+        let anchorView = NSView(frame: NSRect(x: 0, y: 0, width: 1, height: 1))
+        anchor.contentView = anchorView
         anchor.orderFrontRegardless()
 
         let popover = NSPopover()
@@ -121,7 +120,7 @@ enum UIPreviewStudio {
         popover.contentSize = size
         popover.contentViewController = NSHostingController(rootView: view)
 
-        popover.show(relativeTo: NSRect(x: 0, y: 0, width: 1, height: 1), of: host, preferredEdge: .minY)
+        popover.show(relativeTo: anchorView.bounds, of: anchorView, preferredEdge: .minY)
         await settle(seconds: scene.settleTime)
 
         if let window = popover.contentViewController?.view.window {
