@@ -3,7 +3,7 @@ import PureListenCore
 
 // MARK: - 浮动播放台
 
-/// 玻璃播放台: 浮在列表之上, 内容从它下方滚过 —— Golden Gate 的标志性层次。
+/// 玻璃播放台：列表在上沿渐隐，保持圆角周围与玻璃背景干净。
 struct PopoverTransport: View {
     @EnvironmentObject var state: AppState
     @EnvironmentObject var router: PopoverRouter
@@ -63,7 +63,7 @@ struct PopoverTransport: View {
             } label: {
                 HStack(spacing: DS.Space.m) {
                     CoverArtwork(url: state.currentCoverURL, size: 34,
-                                 radius: DS.Radius.artSmall, shadow: true,
+                                 radius: DS.Radius.artSmall,
                                  borderOpacity: 0.16)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(hasTrack ? state.trackStatus.title : "未在播放")

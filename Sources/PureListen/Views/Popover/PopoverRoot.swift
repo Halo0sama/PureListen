@@ -59,29 +59,26 @@ struct PopoverShell: View {
                 content
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            .mask {
+                if router.route == .nowPlaying {
+                    Color.white
+                } else {
+                    // 隐去列表本身及其封面投影，避免透过玻璃形成局部色块。
+                    VStack(spacing: 0) {
+                        Color.white
+                        LinearGradient(colors: [.white, .clear],
+                                       startPoint: .top, endPoint: .bottom)
+                            .frame(height: 38)
+                        Color.clear.frame(height: 112)
+                    }
+                }
+            }
 
             if router.route != .nowPlaying {
-                // 底部两角: 用画布色盖住 popover 圆角外侧的内容。
-                LinearGradient(stops: [
-                    .init(color: DS.Palette.canvas.opacity(0), location: 0),
-                    .init(color: DS.Palette.canvas.opacity(0.86), location: 0.55),
-                    .init(color: DS.Palette.canvas, location: 1),
-                ], startPoint: .top, endPoint: .bottom)
-                    .frame(height: 42)
-                    .frame(maxHeight: .infinity, alignment: .bottom)
-                    .allowsHitTesting(false)
-
-                VStack(spacing: 0) {
-                    // 底部渐隐: 让列表在玻璃台下方自然淡出。
-                    LinearGradient(colors: [DS.Palette.canvas.opacity(0), DS.Palette.canvas],
-                                   startPoint: .top, endPoint: .bottom)
-                        .frame(height: 38)
-                        .allowsHitTesting(false)
-                    PopoverTransport()
-                        .padding(.horizontal, 12)
-                        .padding(.bottom, 12)
-                }
-                .transition(.move(edge: .bottom).combined(with: .opacity))
+                PopoverTransport()
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 12)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
         .environmentObject(router)

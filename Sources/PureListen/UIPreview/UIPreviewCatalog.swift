@@ -1,6 +1,7 @@
 #if DEBUG
 import AppKit
 import SwiftUI
+import PureListenCore
 
 /// 截图场景清单: 新增/调整界面时, 在这里登记需要出图的画面。
 @MainActor
@@ -26,6 +27,21 @@ enum UIPreviewCatalog {
             presentation: .popover(size: popoverSize),
             settleTime: 1.0,
             configure: { _ in },
+            makeView: { AnyView(ContentView()) }
+        ))
+
+        scenes.append(.init(
+            name: "popover-home-idle",
+            presentation: .popover(size: popoverSize),
+            settleTime: 1.0,
+            configure: { state in
+                state.playerState = .idle
+                state.trackStatus = ExclusivePlayer.TrackStatus()
+                state.currentIndex = -1
+                state.currentItem = nil
+                state.lyrics = []
+                state.volume = 0.25
+            },
             makeView: { AnyView(ContentView()) }
         ))
 
