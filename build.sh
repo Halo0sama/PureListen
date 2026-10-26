@@ -1,5 +1,5 @@
 #!/bin/bash
-# 净听 PureListen 打包脚本: Release 构建 → 组装 .app → 签名
+# 净听 PureListen 打包脚本: Release 构建 → 组装 .app → 签名 → 保留数据安装
 #
 # 签名:
 #   默认尝试用稳定身份 "PureListen Dev"（tools/setup-dev-signing.sh 生成的自签名证书）。
@@ -87,10 +87,14 @@ sign_app "$APP"
 
 codesign --verify --deep --strict "$APP"
 plutil -lint "$APP/Contents/Info.plist"
-# 签名与元数据均验证成功后才替换旧构建产物。安装由用户显式执行。
+# 签名与元数据均验证成功后才替换旧构建产物。
 rm -rf "dist/净听.app"
 mv "$APP" "dist/净听.app"
 APP="dist/净听.app"
 
 echo "==> 完成: $APP"
-echo "    安装: cp -r \"$APP\" /Applications/  然后双击运行(首次需在 Finder 里右键打开)"
+if [ "${PURELISTEN_NO_INSTALL:-0}" = "1" ]; then
+    echo "    已按 PURELISTEN_NO_INSTALL=1 跳过安装。"
+else
+    /bin/bash tools/install-app.sh "$APP"
+fi

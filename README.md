@@ -59,9 +59,11 @@ macOS 会把所有 App 的音频混在一起, 统一重采样 (SRC) 后输出。
 ## 使用
 
 ```bash
-./build.sh          # 只构建并打包，优先稳定签名；不自动替换已安装应用
-cp -r "dist/净听.app" /Applications/
+./build.sh          # 构建、签名、备份旧版并保留数据安装到 /Applications/净听.app
+# 仅检查构建、不安装时：PURELISTEN_NO_INSTALL=1 ./build.sh
 ```
+
+每次新版默认自动安装。升级只替换应用包，保留账号、设置、网页登录资料和歌曲缓存；旧版及偏好备份位于 `~/Library/Application Support/PureListen Upgrades/`。正在运行时先正常退出，升级验证成功后重新打开；未运行时保持关闭。安装失败会恢复旧版。
 
 1. 菜单栏出现唱片环图标, 点开扫码登录 (用网易云音乐 App 扫);
 2. 选歌单, 点歌, 插上 3.5mm 耳机, 完事;
@@ -119,7 +121,8 @@ Resources/AppIcon.icns       应用图标 (macOS 27 分层玻璃风格)
 docs/design/                 视觉规范、设计说明、截图、图标源文件
 docs/research/               macOS 27 设计语言研究 + SDK API 速查
 tools/shoot-screens.sh       一键重出界面截图
-build.sh                     Release 构建 + 组装 .app + 签名与完整性验证
+build.sh                     Release 构建 + 组装 .app + 签名验证 + 保留数据安装
+tools/install-app.sh         暂存验证、旧版备份、替换失败恢复与安装后校验
 ```
 
 ## 自测

@@ -39,7 +39,7 @@ PURELISTEN_SIGN_IDENTITY="My Cert" ./build.sh
 
 签名要求变了，**需要重新授权一次**（之后 rebuild 不再丢）：
 
-1. 重新 `./build.sh` 生成新版，再手动复制 `dist/净听.app` 到 `/Applications`；
+1. 重新 `./build.sh`，脚本会备份旧版并保留数据安装到 `/Applications/净听.app`；
 2. 净听 → 设置 → 播放保护 → 点「去授权」；
 3. 系统设置 → 隐私与安全性 → 辅助功能 → 把「净听」**关掉再打开**；
 4. 回到净听，几秒内自动接管媒体键（App 内会静默轮询权限变化）。
